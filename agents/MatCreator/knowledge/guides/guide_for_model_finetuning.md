@@ -1,9 +1,8 @@
 ---
 name: guide_for_model_training
-description: General guideline for model training.
-tags: [model_training, fine-tuning, pre-trained, workflow]
-allowed_agents: [dpa_agent, abacus_agent, structure_agent, plot_agent]
-triggers: [train, training, model, fine-tune, finetune, pre-trained, force field]
+description: General guideline for MLFF model training.
+skills: [dpa_agent, abacus_agent, structure_agent, plot_agent]
+tags: [model, fine-tune, machine learning force field]
 ---
 Model training is a dynamic, iterative process. Follow this decision flow and revisit earlier steps if results are unsatisfactory.
 
@@ -23,7 +22,7 @@ Model training is a dynamic, iterative process. Follow this decision flow and re
 ### Stage 3 — PFD Workflow (Last Resort)
 - If no available dataset or fine-tuned model is insufficient, launch the PFD workflow.
 - PFD iteratively generates new data via MD exploration, labels it, and retrains until convergence.
-- See `pfd-finetuning` skill for full details.
+- See `pfd-finetuning` guide for full details.
 
 ## General Notes
 - Always evaluate the model after each step before proceeding to the next.

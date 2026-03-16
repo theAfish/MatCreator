@@ -12,7 +12,7 @@ import os
 import logging
 from typing import Optional, Any
 from .thinking_agent import thinking_agent
-from .execution_agent import build_execution_agent
+from .execution_agent import execution_agent
 from .summarize_agent import summarize_agent
 from .constants import LLM_MODEL, LLM_API_KEY, LLM_BASE_URL
 from .callbacks import (
@@ -67,7 +67,7 @@ You DO NOT execute tasks directly. You route work using the session phase:
 class MatCreatorFlowAgent(BaseAgent):
     """Root agent with enforced phase-based routing."""
 
-    _execution_agent: Optional[Any] = PrivateAttr(default=None)
+    _execution_agent: Optional[Any] = PrivateAttr(default_factory=lambda: execution_agent)
 
     @property
     def execution_agent(self) -> Optional[Any]:
@@ -88,6 +88,8 @@ class MatCreatorFlowAgent(BaseAgent):
             logger.info(f"[{self.name}]: Starting thinking")
             async for event in thinking_agent.run_async(ctx):
                 yield event
+                if state.get("approval", False):
+                    break
 
             if not state.get("approval", False):
                 return
@@ -99,14 +101,9 @@ class MatCreatorFlowAgent(BaseAgent):
         )
             yield event
             
-            
-            
         if ctx.session.state["phase"]=="execution":
             logger.info(f"[{self.name}]: Starting execution loop")
-            if self.execution_agent == None:
-                logger.info(f"[{self.name}]: Building execution agent from approved plan")
-                self.execution_agent = build_execution_agent(ctx.session.state.get("plan", {}))
-                
+            #if self.execution_agent == None:
             while True:
                 async for event in self._run_async_execution(ctx):
                     yield event

@@ -22,11 +22,21 @@ from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 from ..constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-from ..prompts.subagents import format_subagent_descriptions
+from ..prompts.subagents import format_subagent_descriptions, SUBAGENTS
 from .planning_agent.agent import plan_builder_agent
-from .skill import _load_skill_registry
+from .skill import _load_skill_registry, list_skill_name_descriptions, get_all_guides_text
 from .memory import load_memory
 from .memory import update_memory
+from .workspace_tools import (
+    write_workspace_file,
+    read_workspace_file,
+    list_workspace_skills,
+    create_skill,
+    run_python,
+    run_bash,
+    run_python_file,
+    init_workspace_tool,
+)
 from ..constants import _KNOWLEDGE_PATH
 
 def _load_glossary() -> str:
@@ -107,6 +117,15 @@ You orchestrate planning through tool sub-agents:
 - approval_execution             : ask user permission to proceed to Execution
 - update_memory(new_entries)     : appends new knowledge to MEMORY.md
 
+Workspace skill authoring tools (MatClaw):
+- init_workspace_tool            : create .workspace/ and seed with built-in defaults
+- list_workspace_skills          : list skills in the workspace
+- create_skill                   : scaffold a new skill directory + markdown file
+- write_workspace_file           : write any file under the workspace (skill scripts, guides, etc.)
+- read_workspace_file            : read any file from the workspace
+- run_python / run_bash          : execute code — REQUIRES explicit user approval first
+- run_python_file                : execute a workspace Python script — REQUIRES explicit user approval
+
 You keep track of these state to decide what to do:
 - Goal: {goal} 
 - Execution plan: {plan}
@@ -116,6 +135,8 @@ Approval gate:
 - Always check with user after running `intent_tool_agent`.
 - Call `approval_execution` before moving to execution.
 - If the user requests changes or asks questions, remain in thinking phase.
+- NEVER call run_python, run_bash, or run_python_file without first showing the
+  code/command to the user and confirming they approve.
 """
 
 # ---------------------------------------------------------------------------
@@ -166,6 +187,11 @@ def before_tool_callback(
     if tool.name == "plan_builder_agent":
         tool_context.state["agents"] = format_subagent_descriptions()
         tool_context.state["memory"] = load_memory()
+        skill_summaries = list_skill_name_descriptions()
+        tool_context.state["skills"] = "\n".join(
+            f"- {item['name']}: {item['description']}" for item in skill_summaries
+        ) if skill_summaries else "No skills available."
+        tool_context.state["guides"] = get_all_guides_text() or "No guides available."
 
     if tool.name == "intent_tool_agent":
         tool_context.state["memory"] = load_memory()
@@ -174,10 +200,10 @@ def before_tool_callback(
         registry = _load_skill_registry()
         lines = []
         for skill in registry.values():
-            #tags_str = ", ".join(skill.tags) if skill.tags else "none"
-            lines.append(f"- {skill.name}: {skill.description} - Instruction {skill.instruction})")
+            lines.append(f"- {skill.name}: {skill.description}")
         skills_text = "\n\n".join(lines) if lines else "No skills available."
-        tool_context.state["skills"] = skills_text
+        if not tool_context.state.get("skills"):
+            tool_context.state["skills"] = skills_text
     return None  # always return None to let the tool proceed normally
 
 # After tool modifier
@@ -211,9 +237,9 @@ def after_tool_modifier(
     elif tool_name == 'plan_builder_agent':
         tool_context.state['plan'] = tool_response
         tool_context.state['detailed_steps'] = tool_response.get('steps')
-        tool_context.state['agents_needed'] = list({
-            step['agent'] for step in (tool_response.get('steps') or [])
-            if isinstance(step, dict) and 'agent' in step
+        tool_context.state['skills_needed'] = list({
+            step['skill'] for step in (tool_response.get('steps') or [])
+            if isinstance(step, dict) and step.get('skill')
         })
         
     
@@ -241,7 +267,9 @@ def after_model_modifier(
 def approval_execution(tool_context: ToolContext) -> dict:
     """Transition to execution phase. Only call this AFTER the user has explicitly
     approved the plan in natural language (e.g. 'yes', 'ok', 'proceed', 'looks good').
-    Do NOT call this if the user is still asking questions or requesting changes."""
+    Do NOT call this if the user is still asking questions or requesting changes.
+    An execution agent with clean context would be spawned after this to carry out the plan.
+    """
     #"""Call this function to ask for user approval for execution"""
     tool_context.state["approval"] = True
     return {
@@ -267,8 +295,16 @@ thinking_agent = LlmAgent(
         AgentTool(intent_tool_agent),
         AgentTool(plan_builder_agent),
         update_memory,
-        FunctionTool(approval_execution,
-                     )
+        FunctionTool(approval_execution),
+        # Workspace / MatClaw skill authoring tools
+        FunctionTool(init_workspace_tool),
+        FunctionTool(list_workspace_skills),
+        FunctionTool(create_skill),
+        FunctionTool(write_workspace_file),
+        FunctionTool(read_workspace_file),
+        FunctionTool(run_python),
+        FunctionTool(run_bash),
+        FunctionTool(run_python_file),
     ],
     before_agent_callback=before_agent_callback,
     before_tool_callback=before_tool_callback,

@@ -22,4 +22,20 @@ EXECUTION_COMPACT_EVERY_EVENTS: int = int(os.environ.get("EXECUTION_COMPACT_EVER
 
 _KNOWLEDGE_PATH= _script_dir / "knowledge"
 _SKILLS_DIR = _KNOWLEDGE_PATH / "skills"
+_GUIDES_DIR = _KNOWLEDGE_PATH / "guides"
 _MEMORY_PATH = _KNOWLEDGE_PATH /"MEMORY.md"
+
+# Workspace paths — resolved lazily at runtime via workspace.get_workspace_root()
+# These are re-exported here for convenience so other modules only need one import.
+def _workspace_root() -> "Path":
+    from .workspace import get_workspace_root
+    return get_workspace_root()
+
+def _workspace_skills_dir() -> "Path":
+    return _workspace_root() / "skills"
+
+def _workspace_guides_dir() -> "Path":
+    return _workspace_root() / "guides"
+
+def _workspace_memory_path() -> "Path":
+    return _workspace_root() / "MEMORY.md"

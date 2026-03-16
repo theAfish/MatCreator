@@ -1,46 +1,38 @@
-"""Markdown-backed workflow skills and search utilities for MatCreator."""
+"""Markdown-backed workflow skills and search utilities for MatCreator.
+
+Loading order (later entries override earlier ones with the same skill name):
+1. Built-in package skills  : knowledge/skills/*.md  and  knowledge/skills/*/*.md
+2. Workspace overlay skills : $MATCLAW_WORKSPACE/skills/*.md  and  …/skills/*/*.md
+"""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
-from ..constants import _SKILLS_DIR
+from typing import Dict, List
+from ..constants import _SKILLS_DIR, _GUIDES_DIR, _workspace_skills_dir, _workspace_guides_dir
 
 
 @dataclass(frozen=True)
 class Skill:
-    """Container for agent skillsfrom markdown skills."""
-    # deprecate workflow_type
-    # workflow_type: str
+    """Container for agent skills from markdown skills."""
     instruction: str
-    tags: List[str]
-    keywords: List[str]
     description: str
-    allowed_agents: List[str]
+    needed_tools: List[str]
+    dependent_skills: List[str]
     name: str
     source_path: str
 
 
 @dataclass(frozen=True)
-class SkillSearchResult:
-    """Single ranked skill search hit."""
-
+class Guide:
+    """Higher-level guidance on how to organise and deploy skills for specific tasks."""
     name: str
     description: str
+    body: str
     tags: List[str]
-    allowed_agents: List[str]
+    skills: List[str]
     source_path: str
-    guidance: str
-    score: float
-    workflow_type: str = ""  # deprecated, kept for backward compatibility
-
-
-def _tokenize(text: str) -> List[str]:
-    return re.findall(r"[a-z0-9_\-]+", (text or "").lower())
-
 
 def _parse_list_value(raw_value: str) -> List[str]:
     value = (raw_value or "").strip()
@@ -75,95 +67,146 @@ def _parse_skill_markdown(path: Path) -> Skill:
 
     name = metadata.get("name") or path.stem
     description = metadata.get("description", "")
-    tags = _parse_list_value(metadata.get("tags", ""))
-    keywords = _parse_list_value(metadata.get("triggers", ""))
-    allowed_agents = _parse_list_value(metadata.get("allowed_agents", ""))
+    needed_tools = _parse_list_value(metadata.get("tools", ""))
+    dependent_skills = _parse_list_value(metadata.get("dependent_skills", ""))
 
     return Skill(
         instruction=body.strip(),
-        tags=tags,
-        keywords=keywords,
         description=description,
-        allowed_agents=allowed_agents,
+        needed_tools=needed_tools,
+        dependent_skills=dependent_skills,
         name=name,
         source_path=str(path),
     )
 
 
-@lru_cache(maxsize=1)
+def _collect_skill_paths(root: Path) -> List[Path]:
+    """Yield skill markdown files from *root*, supporting both layouts:
+
+    - Flat   : root/skill_name.md
+    - Subdir : root/skill_name/skill_name.md  (canonical MatClaw layout)
+
+    Subdirectory layout takes precedence when both exist for the same stem.
+    """
+    flat: Dict[str, Path] = {}
+    for p in sorted(root.glob("*.md")):
+        flat[p.stem] = p
+
+    subdir: Dict[str, Path] = {}
+    for p in sorted(root.glob("*/*.md")):
+        # Only match canonical pattern: skills/FOO/FOO.md
+        if p.stem == p.parent.name:
+            subdir[p.stem] = p
+
+    merged = {**flat, **subdir}  # subdir wins
+    return list(merged.values())
+
+
 def _load_skill_registry() -> Dict[str, Skill]:
+    """Build the merged skill registry (built-ins + workspace overlay).
+
+    NOT cached with lru_cache so that runtime workspace changes (e.g. a new
+    skill written by the agent) are picked up on the next call.
+    """
     registry: Dict[str, Skill] = {}
-    for md_path in sorted(_SKILLS_DIR.glob("*.md")):
-        skill = _parse_skill_markdown(md_path)
-        registry[skill.name] = skill
+
+    # 1. Built-in package skills
+    if _SKILLS_DIR.exists():
+        for md_path in _collect_skill_paths(_SKILLS_DIR):
+            skill = _parse_skill_markdown(md_path)
+            registry[skill.name] = skill
+
+    # 2. Workspace overlay (may override built-ins)
+    try:
+        ws_skills = _workspace_skills_dir()
+        if ws_skills.exists():
+            for md_path in _collect_skill_paths(ws_skills):
+                skill = _parse_skill_markdown(md_path)
+                registry[skill.name] = skill
+    except Exception:
+        pass  # workspace not configured — silently ignore
+
     return registry
 
 
-def _skill_score(skill: Skill, query_tokens: Sequence[str]) -> float:
-    if not query_tokens:
-        return 0.0
+def _parse_guide_markdown(path: Path) -> Guide:
+    raw_text = path.read_text(encoding="utf-8")
+    stripped = raw_text.strip()
 
-    searchable = " ".join(
-        [
-            skill.name,
-            skill.description,
-            " ".join(skill.tags),
-            " ".join(skill.keywords),
-            skill.instruction,
-        ]
-    ).lower()
+    metadata: Dict[str, str] = {}
+    body = raw_text
 
-    score = 0.0
-    for token in query_tokens:
-        if token in searchable:
-            score += 1.0
-        if token in {keyword.lower() for keyword in skill.keywords}:
-            score += 1.5
-        if token in {tag.lower() for tag in skill.tags}:
-            score += 1.0
-    return score
+    if stripped.startswith("---"):
+        first_sep = raw_text.find("---")
+        second_sep = raw_text.find("\n---", first_sep + 3)
+        if second_sep != -1:
+            frontmatter = raw_text[first_sep + 3:second_sep].strip()
+            body = raw_text[second_sep + 4:].strip()
+            for line in frontmatter.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                metadata[key.strip()] = value.strip()
 
-
-def search_skills(
-    query: str,
-    top_k: int = 3,
-) -> List[SkillSearchResult]:
-    """Search markdown skills by semantic token overlap and optional workflow filter."""
-    registry = _load_skill_registry()
-    skills = list(registry.values())
-    query_tokens = _tokenize(query)
-    ranked = sorted(
-        (
-            SkillSearchResult(
-                name=skill.name,
-                description=skill.description,
-                tags=skill.tags,
-                allowed_agents=skill.allowed_agents,
-                source_path=skill.source_path,
-                guidance=skill.instruction,
-                score=_skill_score(skill, query_tokens),
-            )
-            for skill in skills
-        ),
-        key=lambda item: item.score,
-        reverse=True,
+    return Guide(
+        name=metadata.get("name") or path.stem,
+        description=metadata.get("description", ""),
+        body=body.strip(),
+        tags=_parse_list_value(metadata.get("tags", "")),
+        skills=_parse_list_value(metadata.get("skills", "")),
+        source_path=str(path),
     )
 
-    if not ranked:
-        return []
 
-    # Ensure at least one result even when all scores are zero.
-    non_zero = [item for item in ranked if item.score > 0]
-    effective = non_zero if non_zero else ranked
-    return effective[: max(1, top_k)]
+def _load_guide_registry() -> List[Guide]:
+    """Build merged guide list (built-ins + workspace overlay, workspace wins on name clash)."""
+    seen: Dict[str, Guide] = {}
+
+    if _GUIDES_DIR.exists():
+        for p in sorted(_GUIDES_DIR.glob("*.md")):
+            g = _parse_guide_markdown(p)
+            seen[g.name] = g
+
+    try:
+        ws_guides = _workspace_guides_dir()
+        if ws_guides.exists():
+            for p in sorted(ws_guides.glob("*.md")):
+                g = _parse_guide_markdown(p)
+                seen[g.name] = g
+    except Exception:
+        pass
+
+    return list(seen.values())
 
 
+def get_all_guides_text() -> str:
+    """Return all guide bodies concatenated, for injection into the planner prompt."""
+    guides = _load_guide_registry()
+    if not guides:
+        return ""
+    sections = [f"### {g.name}\n{g.body}" for g in guides]
+    return "\n\n---\n\n".join(sections)
+
+
+# Snapshot at import time — callers that need fresh data should call
+# _load_skill_registry() directly (e.g. after a workspace skill is created).
 SKILL_LIBRARY = _load_skill_registry()
 
 
+def list_skill_name_descriptions() -> List[Dict[str, str]]:
+    """Return planner-facing skill summaries from the loaded skill library."""
+    return [
+        {
+            "name": skill.name,
+            "description": skill.description,
+        }
+        for skill in SKILL_LIBRARY.values()
+    ]
+
 __all__ = [
     "Skill",
-    "SkillSearchResult",
+    "Guide",
+    "list_skill_name_descriptions",
+    "get_all_guides_text",
     "SKILL_LIBRARY",
-    "search_skills"
 ]

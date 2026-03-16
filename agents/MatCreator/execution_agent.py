@@ -1,18 +1,17 @@
-"""Execution agent for MatCreator - executes approved plans by delegating to domain agents."""
+"""Execution agent for MatCreator - executes approved plans using skill-scoped toolsets."""
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
 import logging
 from typing import Dict, Any, List
 from google.adk.agents import LlmAgent, InvocationContext
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools.function_tool import FunctionTool
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.events import Event, EventActions
 from google.genai.types import Content, Part
@@ -24,8 +23,15 @@ from .constants import (
     EXECUTION_COMPACT_EVERY_EVENTS,
 )
 from .callbacks import after_tool_callback
-from .prompts.subagents import (
-    SUBAGENTS,
+from .tools import TOOLSETS
+from .thinking_agent.skill import (
+    SKILL_LIBRARY,
+    Skill,
+)
+from .thinking_agent.workspace_tools import (
+    run_python,
+    run_bash,
+    run_python_file
 )
 
 _model_name = os.environ.get("LLM_MODEL", LLM_MODEL)
@@ -56,11 +62,21 @@ _EXECUTION_ENABLE_WITHIN_INVOCATION_COMPACTION = _env_flag(
 logger = logging.getLogger()
 
 _EXECUTION_INSTRUCTION = """
-You are the execution agent. Your sole responsibility is to execute an approved plan by delegating to domain agents.
+You are the execution agent. Your sole responsibility is to execute an approved plan by selecting the right skill and using direct tools.
 
 Plans: {detailed_steps}
 
+Skill catalog: {skills}
+
+Current skill: {execution_active_skill}
+
+Current skill instruction: {execution_active_skill_instruction}
+
 Previous execution history: {summarize}
+
+Critical rule:
+- Before executing EACH plan step, call `load_skill_context(skill_name=<step.skill>)`.
+- After loading context, follow the returned skill instruction and restrict tool usage to current skill tools.
 """
 
 
@@ -75,8 +91,138 @@ def break_execution(tool_context: ToolContext) -> dict[str, str]:
     }
 
 
+
+def load_skill_context(skill_name: str, tool_context: ToolContext) -> dict[str, Any]:
+    """Load execution context for a skill by name from SKILL_LIBRARY.
+
+    IMPORTANT: Call this tool BEFORE executing each plan step.
+    Use the step's `skill` value as `skill_name` so the executor can load
+    skill-specific instruction and the related tool scope for that step.
+    """
+    normalized = (skill_name or "").strip()
+    if not normalized:
+        return {
+            "status": "error",
+            "message": "skill_name is required.",
+            "available_skills": sorted(SKILL_LIBRARY.keys()),
+        }
+
+    selected: Skill | None = SKILL_LIBRARY.get(normalized)
+    if selected is None:
+        lowered = normalized.lower()
+        for name, skill in SKILL_LIBRARY.items():
+            if name.lower() == lowered:
+                selected = skill
+                break
+
+    if selected is None:
+        return {
+            "status": "error",
+            "message": f"Skill '{skill_name}' not found in SKILL_LIBRARY.",
+            "available_skills": sorted(SKILL_LIBRARY.keys()),
+        }
+
+
+    selected_tool_names: List[str] = []
+    for tool_name in selected.needed_tools:
+        if tool_name not in selected_tool_names:
+            selected_tool_names.append(tool_name)
+
+
+    tool_context.state["execution_active_skill"] = selected.name
+    tool_context.state["execution_active_skill_instruction"] = selected.instruction
+    tool_context.state["execution_selected_tool_names"] = selected_tool_names
+    tool_context.state["execution_selected_tool_names_text"] = ", ".join(selected_tool_names) if selected_tool_names else "No explicit tools listed."
+    tool_context.state["execution_active_skill_source"] = selected.source_path
+
+    return {
+        "status": "ok",
+        "skill": selected.name,
+        "instruction": tool_context.state["execution_active_skill_instruction"],
+        "selected_tool_names": selected_tool_names,
+        "message": f"Loaded skill context for '{selected.name}'.",
+    }
+
+def execution_after_tool_callback(
+    tool: BaseTool,
+    args: Dict[str, Any],
+    tool_context: ToolContext,
+    tool_response: Dict[str, Any],
+):
+    """Execution callback wrapper: log all tools and inject skill context after lookup."""
+    after_tool_callback(tool=tool, args=args, tool_context=tool_context, tool_response=tool_response)
+
+    tool_name = getattr(tool, "name", "")
+    if tool_name != "load_skill_context":
+        return None
+
+    if not isinstance(tool_response, dict):
+        return None
+
+    if tool_response.get("status") != "ok":
+        return None
+
+    selected = tool_response.get("selected_tool_names") or []
+    if isinstance(selected, list):
+        tool_context.state["execution_selected_tool_names"] = selected
+        tool_context.state["execution_selected_tool_names_text"] = ", ".join(selected) if selected else "No explicit tools listed."
+
+    instruction = tool_response.get("instruction")
+    if isinstance(instruction, str) and instruction.strip():
+        tool_context.state["execution_active_skill_instruction"] = instruction
+
+    return None
+
+
 class ExecutionAgent(LlmAgent):
     """Agent that executes approved plans by orchestrating domain agents."""
+
+    # Tools that must always remain available regardless of active skill
+    _ALWAYS_AVAILABLE_TOOLS: set[str] = {
+        "load_skill_context", 
+        "break_execution",
+        "run_python",
+        "run_bash",
+        "run_python_file",
+        }
+
+    async def canonical_tools(self, ctx=None) -> List[BaseTool]:
+        """Filter tools to those required by the active skill.
+
+        When a skill is active (i.e. `load_skill_context` has been called),
+        only expose tools belonging to that skill plus the always-available
+        control tools.  Before any skill is loaded the full tool list is
+        returned so the LLM can immediately call `load_skill_context`.
+        """
+        all_tools: List[BaseTool] = await super().canonical_tools(ctx)
+
+        active_names: list[str] = []
+        if ctx is not None:
+            state = getattr(ctx, "state", None) or {}
+            active_names = list(state.get("execution_selected_tool_names") or [])
+
+        # No skill loaded yet — return everything so the LLM can pick a skill.
+        if not active_names:
+            return all_tools
+
+        allowed = set(active_names) | self._ALWAYS_AVAILABLE_TOOLS
+        filtered = [t for t in all_tools if getattr(t, "name", None) in allowed]
+
+        logger.info(
+            "Tool filtering for active skill '%s': allowed=%s filtered_count=%d total_count=%d",
+            ctx.state.get("execution_active_skill", "unknown") if ctx else "unknown",
+            allowed,
+            len(filtered),
+            len(all_tools)
+            )
+        
+        # Safety: never return an empty list — fall back to full set.
+        if not filtered:
+            logger.warning(
+                "Tool filtering resulted in empty toolset for active skill '%s'. Returning full toolset as fallback.",
+                ctx.state.get("execution_active_skill", "unknown") if ctx else "unknown",
+            )
+        return filtered if filtered else all_tools
 
     @staticmethod
     def _is_compaction_event(event: Event) -> bool:
@@ -275,6 +421,16 @@ class ExecutionAgent(LlmAgent):
             "execution_mid_invocation_compactions": 0,
             "execution_mid_invocation_last_summary": "",
             "execution_within_invocation_compaction_enabled": _EXECUTION_ENABLE_WITHIN_INVOCATION_COMPACTION,
+            "execution_active_skill": "",
+            "execution_active_skill_instruction": "",
+            "execution_selected_tool_names": [],
+            "execution_selected_tool_names_text": "Call load_skill_context before each step.",
+            "skills": "\n".join(
+                [
+                    f"- {skill_id}: {skill.description}"
+                    for skill_id, skill in SKILL_LIBRARY.items()
+                ]
+            ),
             "force_break": False,
         }
         ctx.session.state.update(state_update)
@@ -342,66 +498,7 @@ class ExecutionAgent(LlmAgent):
         finally:
             logger.info("Execution agent finished (assessment agent will determine next steps)")
 
-
-# Module-level cache: plan fingerprint -> ExecutionAgent instance
-_execution_agent_cache: dict[str, "ExecutionAgent"] = {}
-
-
-def _plan_fingerprint(plan: dict) -> str:
-    """Stable hash of the sorted agent names referenced in a plan."""
-    steps = plan.get("steps", []) if isinstance(plan, dict) else []
-    names = sorted({step["agent"] for step in steps if isinstance(step, dict) and "agent" in step})
-    return hashlib.md5(json.dumps(names).encode()).hexdigest()
-
-
-def _clone_agent(agent: LlmAgent) -> LlmAgent:
-    """Return a shallow Pydantic copy of *agent* with its parent reference cleared.
-
-    ADK enforces a single-parent constraint; cloning lets the same logical
-    sub-agent be attached to multiple ExecutionAgent instances without collision.
-    """
-    cloned = agent.model_copy(deep=False)
-    object.__setattr__(cloned, "_parent_agent", None)
-    return cloned
-
-
-def clear_execution_agent_cache() -> None:
-    """Flush the cached execution agents (e.g. after hot-reloading sub-agents)."""
-    _execution_agent_cache.clear()
-    logger.info("[ExecutorFactory] Execution agent cache cleared.")
-
-
-def build_execution_agent(plan: dict) -> ExecutionAgent:
-    """Factory that instantiates an ExecutionAgent scoped to the agents named in *plan*.
-
-    The set of required domain agents is derived from the ``agent`` field of each
-    ``PlanStep`` in *plan*. Only agents present in the global SUBAGENTS registry are
-    attached; unknown names are logged as warnings. If the plan is empty or malformed
-    every registered sub-agent is attached as a safe fallback.
-
-    Results are cached by plan fingerprint so the same ExecutionAgent instance is
-    reused for identical agent sets, avoiding ADK's single-parent constraint.
-    """
-    fingerprint = _plan_fingerprint(plan)
-    if fingerprint in _execution_agent_cache:
-        logger.info(f"[ExecutorFactory] Reusing cached execution agent ({fingerprint[:8]})")
-        return _execution_agent_cache[fingerprint]
-
-    steps = plan.get("steps", []) if isinstance(plan, dict) else []
-    needed_names: set[str] = {step["agent"] for step in steps if isinstance(step, dict) and "agent" in step}
-
-    if needed_names:
-        unknown = needed_names - SUBAGENTS.keys()
-        if unknown:
-            logger.warning(f"[ExecutorFactory] Plan references unknown agents: {unknown} — they will be skipped.")
-        sub_agents = [_clone_agent(SUBAGENTS[name]) for name in needed_names if name in SUBAGENTS]
-        logger.info(f"[ExecutorFactory] Attaching sub-agents: {[a.name for a in sub_agents]}")
-    else:
-        # Fallback: attach all registered agents when plan provides no agent names
-        logger.warning("[ExecutorFactory] No agent names found in plan steps — attaching all sub-agents as fallback.")
-        sub_agents = [_clone_agent(a) for a in SUBAGENTS.values()]
-
-    agent = ExecutionAgent(
+execution_agent = ExecutionAgent(
         name="execution_agent",
         model=LiteLlm(
             model=_model_name,
@@ -410,20 +507,16 @@ def build_execution_agent(plan: dict) -> ExecutionAgent:
         ),
         description="Executes approved plans by delegating to domain-specific agents in sequence.",
         instruction=_EXECUTION_INSTRUCTION,
-        after_tool_callback=after_tool_callback,
+        after_tool_callback=execution_after_tool_callback,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
-        tools=[FunctionTool(break_execution)],
-        sub_agents=sub_agents,
+        tools=[
+            FunctionTool(load_skill_context), 
+            FunctionTool(break_execution), 
+            FunctionTool(run_python),
+            FunctionTool(run_bash),
+            FunctionTool(run_python_file),
+            *TOOLSETS],
+        sub_agents=[],
     )
 
-    _execution_agent_cache[fingerprint] = agent
-    logger.info(f"[ExecutorFactory] Created and cached execution agent ({fingerprint[:8]})")
-    return agent
-
-
-# Export helpers
-__all__ = [
-    "build_execution_agent",
-    "clear_execution_agent_cache",
-]

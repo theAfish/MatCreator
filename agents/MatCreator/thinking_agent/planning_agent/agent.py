@@ -16,9 +16,10 @@ from typing import Any, List
 from google.adk.agents import InvocationContext, LlmAgent
 from google.adk.events import Event
 from google.adk.models.lite_llm import LiteLlm
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ...constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from ..skill import SKILL_LIBRARY
 
 _model_name = os.environ.get("LLM_MODEL", LLM_MODEL)
 _model_api_key = os.environ.get("LLM_API_KEY", LLM_API_KEY)
@@ -26,6 +27,7 @@ _model_base_url = os.environ.get("LLM_BASE_URL", LLM_BASE_URL)
 _plan_builder_max_attempts = int(os.environ.get("PLAN_BUILDER_MAX_ATTEMPTS", "10"))
 
 logger = logging.getLogger()
+_ALLOWED_SKILL_NAMES = set(SKILL_LIBRARY.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -37,31 +39,26 @@ class PlanStep(BaseModel):
     """Single step in the execution plan."""
 
     step_number: int = Field(..., description="Sequential step number (1, 2, 3, ...)")
-    agent: str = Field(
+    skill: str = Field(
         ...,
-        description=(
-            "Agent or tool that will execute this step."
-        ),
+        description="Skill name used by the executor to load relevant tools and instruction.",
+        min_length=1,
     )
     action: str = Field(
         ...,
         description="Clear, concise description of what this step does (1-2 sentences)",
         max_length=500,
     )
-    #transfer_back: bool = Field(
-    #    ...,
-    #    description="Default to False. Transfer back to the thinking agent if not sure whether to execute next step or not."
-    #)
-    #inputs_required: str = Field(
-    #    ...,
-    #    description="Expected inputs (models, parameters, etc.)",
-    #    max_length=300,
-    #)
-    #expected_output: str = Field(
-    #    ...,
-    #    description="What result this step produces",
-    #    max_length=300,
-    #)
+
+    @field_validator("skill")
+    @classmethod
+    def _validate_skill_name(cls, value: str) -> str:
+        if value not in _ALLOWED_SKILL_NAMES:
+            allowed = ", ".join(sorted(_ALLOWED_SKILL_NAMES)) or "<none loaded>"
+            raise ValueError(
+                f"Invalid skill '{value}'. Allowed skills are: {allowed}"
+            )
+        return value
 
 
 class ExecutionPlan(BaseModel):
@@ -107,15 +104,16 @@ detailed, actionable execution plan.
 
 Input:
 - goal: {goal}
+- guides: {guides}
 - skills: {skills}
-- agent_descriptions: {agents}
 - memory: {memory}
 - current plan {plan}
 
 Requirements:
-- Use ONLY agent names that appear in agent_descriptions.
+- Use ONLY skill values that appear in skills.
 - Keep each step specific and concise.
 - List steps ONLY for the current stage.
+- Every step must include: step_number, skill, action.
 
 Strictly Follow the JSON output.
 """

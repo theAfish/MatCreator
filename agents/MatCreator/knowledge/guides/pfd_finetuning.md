@@ -2,7 +2,7 @@
 name: pfd-finetuning
 description: Iterative workflow that fine-tune pre-trained ML force fields.
 tags: [iterative, active_learning, fine-tune]
-allowed_agents: [structure_agent, abacus_agent, dpa_agent, plot_agent]
+skills: [structure_agent, abacus_agent, dpa_agent, plot_agent]
 ---
 Coordinate iterative fine-tuning of ML force fields from a pre-trained model.
 
