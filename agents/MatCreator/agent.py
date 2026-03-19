@@ -202,6 +202,9 @@ def before_agent_callback_root(callback_context: CallbackContext):
         
     if 'skills' not in state:
         callback_context.state['skills'] = None
+        
+    if 'guides' not in state:
+        callback_context.state['guides'] = None
     
     if 'execution_started' not in state:
         callback_context.state['execution_started'] = False

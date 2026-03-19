@@ -179,13 +179,44 @@ def _load_guide_registry() -> List[Guide]:
     return list(seen.values())
 
 
-def get_all_guides_text() -> str:
-    """Return all guide bodies concatenated, for injection into the planner prompt."""
-    guides = _load_guide_registry()
-    if not guides:
-        return ""
-    sections = [f"### {g.name}\n{g.body}" for g in guides]
-    return "\n\n---\n\n".join(sections)
+def list_guide_metadata() -> List[Dict[str, str]]:
+    """Return planner-facing guide summaries (name, description, tags) — no body."""
+    return [
+        {
+            "name": g.name,
+            "description": g.description,
+            "tags": ", ".join(g.tags),
+            "skills": ", ".join(g.skills),
+        }
+        for g in _load_guide_registry()
+    ]
+
+
+def load_guide_content(guide_name: str) -> dict:
+    """Fetch the full body of a guide by name.
+    Call this before building or updating an execution plan when a guide is
+    relevant to the user's goal. 
+    Can be called multiple times before plan building as the agent discovers relevant guides.
+
+    Args:
+        guide_name: Exact guide name as listed by list_guide_metadata.
+
+    Returns:
+        Dict with ``name``, ``description``, ``tags``, ``skills``, and ``body``
+        (the full markdown content), or an ``error`` key if not found.
+    """
+    registry = {g.name: g for g in _load_guide_registry()}
+    guide = registry.get(guide_name)
+    if guide is None:
+        available = ", ".join(sorted(registry.keys())) or "<none>"
+        return {"error": f"Guide '{guide_name}' not found. Available guides: {available}"}
+    return {
+        "name": guide.name,
+        "description": guide.description,
+        "tags": guide.tags,
+        "skills": guide.skills,
+        "body": guide.body,
+    }
 
 
 # Snapshot at import time — callers that need fresh data should call
@@ -207,6 +238,7 @@ __all__ = [
     "Skill",
     "Guide",
     "list_skill_name_descriptions",
-    "get_all_guides_text",
+    "list_guide_metadata",
+    "load_guide_content",
     "SKILL_LIBRARY",
 ]

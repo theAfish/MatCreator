@@ -16,10 +16,11 @@ from typing import Any, List
 from google.adk.agents import InvocationContext, LlmAgent
 from google.adk.events import Event
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.tools.function_tool import FunctionTool
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ...constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-from ..skill import _load_skill_registry
+from ..skill import _load_skill_registry, load_guide_content
 
 _model_name = os.environ.get("LLM_MODEL", LLM_MODEL)
 _model_api_key = os.environ.get("LLM_API_KEY", LLM_API_KEY)
@@ -61,7 +62,7 @@ class PlanStep(BaseModel):
         return value
 
 
-class ExecutionPlan(BaseModel):
+class _ExecutionPlan(BaseModel):
     """Structured execution plan for user approval."""
     stages: List[str] = Field(
         ..., description="Stages of execution, be general. Example: ['Evaluate the pre-trained model','Proceed to fine-tuning only if neccesary']"
@@ -79,6 +80,27 @@ class ExecutionPlan(BaseModel):
         description="Any extra information or considerations for the user",
         max_length=500,
     )
+
+class ExecutionPlan(BaseModel):
+    """Structured execution plan for user approval."""
+    #stages: List[str] = Field(
+    #    ..., description="Stages of execution, be general. Example: ['Evaluate the pre-trained model','Proceed to fine-tuning only if neccesary']"
+    #)
+    #current_stage: int = Field(..., description="The current stage of execution")
+    steps: List[PlanStep] = Field(
+        ...,
+        #description="Ordered list of detailed execution steps, ONLY includes DETERMINED steps",
+        description="Ordered list of detailed steps in the CURRENT stage, ONLY includes DETERMINED steps",
+        min_items=1,
+        max_items=10,
+    )
+    additional_notes: str = Field(
+        ...,
+        description="Any extra information or considerations for the user",
+        max_length=500,
+    )
+
+
 
 
 class PlanBuilderInput(BaseModel):
@@ -104,16 +126,20 @@ detailed, actionable execution plan.
 
 Input:
 - goal: {goal}
-- guides: {guides}
+- available guides (metadata): {guides}
 - skills: {skills}
 - memory: {memory}
 - current plan {plan}
 
+If a guide is relevant to the goal, call `load_guide_content`(guide_name) to fetch its full body
+before drafting the plan. Load AT MOST 2 guides total, then immediately produce the plan.
+Do NOT keep calling `load_guide_content` repeatedly — load the most relevant guide(s) once and proceed.
+
 Requirements:
 - Use ONLY skill values that appear in skills.
 - Keep each step specific and concise.
-- List steps ONLY for the current stage.
 - Every step must include: step_number, skill, action.
+- After any tool calls, output the final ExecutionPlan JSON immediately.
 
 Strictly Follow the JSON output.
 """
@@ -205,7 +231,18 @@ class PlanBuilderAgent(LlmAgent):
 
                 async for event in super()._run_async_impl(ctx):
                     buffered_events.append(event)
-                    if event.is_final_response() and getattr(event, "content", None):
+                    is_final = event.is_final_response()
+                    author = getattr(event, "author", "?")
+                    actions = getattr(event, "actions", None)
+                    tool_calls = (
+                        [tc.function_call.name for tc in (getattr(actions, "tool_calls", None) or []) if hasattr(tc, "function_call")]
+                        if actions else []
+                    )
+                    logger.info(
+                        "[plan_builder_agent] attempt=%d event author=%s is_final=%s tool_calls=%s text_len=%d",
+                        attempt, author, is_final, tool_calls, len(self._extract_event_text(event)),
+                    )
+                    if is_final and getattr(event, "content", None):
                         final_event = event
 
                 _, validation_error = self._validate_execution_plan(final_event)
@@ -230,6 +267,28 @@ class PlanBuilderAgent(LlmAgent):
             self.instruction = base_instruction
 
 
+def _plan_builder_before_tool(
+    tool: Any, args: dict, tool_context: Any
+) -> None:
+    logger.info(
+        "[plan_builder_agent] before_tool | tool=%s | args=%s",
+        getattr(tool, "name", tool),
+        args,
+    )
+    return None
+
+
+def _plan_builder_after_tool(
+    tool: Any, args: dict, tool_context: Any, tool_response: Any
+) -> None:
+    logger.info(
+        "[plan_builder_agent] after_tool  | tool=%s | response=%s",
+        getattr(tool, "name", tool),
+        tool_response,
+    )
+    return None
+
+
 plan_builder_agent = PlanBuilderAgent(
     name="plan_builder_agent",
     model=LiteLlm(
@@ -243,6 +302,11 @@ plan_builder_agent = PlanBuilderAgent(
     instruction=_PLAN_BUILDER_INSTRUCTION,
     input_schema=PlanBuilderInput,
     output_schema=ExecutionPlan,
+    tools=[
+        #FunctionTool(load_guide_content),
+    ],
+    before_tool_callback=_plan_builder_before_tool,
+    after_tool_callback=_plan_builder_after_tool,
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
 )

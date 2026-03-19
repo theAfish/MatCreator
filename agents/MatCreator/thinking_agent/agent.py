@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from ..constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from .planning_agent.agent import plan_builder_agent
-from .skill import _load_skill_registry, list_skill_name_descriptions, get_all_guides_text
+from .skill import list_skill_name_descriptions, list_guide_metadata, load_guide_content
 from .memory import load_memory
 from .memory import update_memory
 from .workspace_tools import (
@@ -115,6 +115,7 @@ You orchestrate planning through tool sub-agents:
 - plan_builder_agent             : drafts and update ExecutionPlan
 - approval_execution             : ask user permission to proceed to Execution
 - update_memory(new_entries)     : appends new knowledge to MEMORY.md
+- load_guide_content(guide_name) : fetch the full body of a guide by name
 
 Workspace skill authoring tools (MatClaw):
 - init_workspace_tool            : create .workspace/ and seed with built-in defaults
@@ -129,6 +130,8 @@ You keep track of these state to decide what to do:
 - Goal: {goal} 
 - Execution plan: {plan}
 - Execution summarize: {summarize}
+- Available guides: {guides}
+
 
 Approval gate:
 - Always check with user after running `intent_tool_agent`.
@@ -175,34 +178,20 @@ def before_agent_callback(callback_context: CallbackContext):
     """Set environment variables and initialize session state for MatCreator agent."""
     callback_context.state['approval'] = False
     callback_context.state.setdefault("summarize",default=None)
+    # load memory
+    callback_context.state["memory"] = load_memory()
+    # load skill
+    skill_summaries = list_skill_name_descriptions()
+    callback_context.state["skills"] = "\n".join(
+        f"- {item['name']}: {item['description']}" for item in skill_summaries
+    ) if skill_summaries else "No skills available."
+    # load guides
+    guide_meta = list_guide_metadata()
+    callback_context.state["guides"] = "\n".join(
+            f"- {g['name']}: {g['description']} (tags: {g['tags']})"
+            for g in guide_meta
+        ) if guide_meta else "No guides available."
     return None
-
-def before_tool_callback(
-    tool: BaseTool,
-    args: dict[str, Any],
-    tool_context: ToolContext,
-) -> Optional[dict]:
-    """Inject state variables before specific agent tools are called."""
-    if tool.name == "plan_builder_agent":
-        tool_context.state["memory"] = load_memory()
-        skill_summaries = list_skill_name_descriptions()
-        tool_context.state["skills"] = "\n".join(
-            f"- {item['name']}: {item['description']}" for item in skill_summaries
-        ) if skill_summaries else "No skills available."
-        tool_context.state["guides"] = get_all_guides_text() or "No guides available."
-
-    if tool.name == "intent_tool_agent":
-        tool_context.state["memory"] = load_memory()
-
-    if tool.name == "plan_builder_agent":
-        registry = _load_skill_registry()
-        lines = []
-        for skill in registry.values():
-            lines.append(f"- {skill.name}: {skill.description}")
-        skills_text = "\n\n".join(lines) if lines else "No skills available."
-        if not tool_context.state.get("skills"):
-            tool_context.state["skills"] = skills_text
-    return None  # always return None to let the tool proceed normally
 
 # After tool modifier
 def after_tool_modifier(
@@ -220,17 +209,6 @@ def after_tool_modifier(
     if tool_name == 'intent_tool_agent':
         # schema output is already in dict format
         tool_context.state['goal'] = tool_response.get('goal')
-
-    elif tool_name == 'skill_search_tool_agent':
-        selected_skills = tool_response.get('selected_skills',[])
-        registry = _load_skill_registry()
-        for name in selected_skills:
-            if skill:=registry.get(name):
-                lines=[]
-                tags_str = ", ".join(skill.tags) if skill.tags else "none"
-                lines.append(f"- {skill.name}: {skill.description} (tags: {tags_str})")
-        skills_text = "\n".join(lines) if lines else "No skills available."
-        tool_context.state["skills"] = skills_text
         
     elif tool_name == 'plan_builder_agent':
         tool_context.state['plan'] = tool_response
@@ -303,9 +281,9 @@ thinking_agent = LlmAgent(
         FunctionTool(run_python),
         FunctionTool(run_bash),
         FunctionTool(run_python_file),
+        FunctionTool(load_guide_content),
     ],
     before_agent_callback=before_agent_callback,
-    before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_modifier,
     after_model_callback=after_model_modifier
 )

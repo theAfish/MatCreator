@@ -22,7 +22,7 @@ from dpa_tool.train import (
     model_inference as _model_inference,
 )
 from dpa_tool.ase_md import optimize_structure as _optimize_structure
-from dpa_tool.utils import set_directory
+from matcreator.utils.utils import set_directory
 
 _script_dir = Path(__file__).parent
 load_dotenv(_script_dir / ".env", override=True)
