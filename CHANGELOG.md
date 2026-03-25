@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.0.11 (2026-03-25)
+
+### Bug Fixes
+
+- Add deempd and dpdispatcher skill
+  ([`4acee84`](https://github.com/nlz25/PFD_Agent/commit/4acee84daa48ff458ae6175cf0044f648b860876))
+
+- Error handling in execution agent
+  ([`419a8c3`](https://github.com/nlz25/PFD_Agent/commit/419a8c37de7f4bc40d628a57599ba4a879b5f07a))
+
+- Update the memory setting
+  ([`a962070`](https://github.com/nlz25/PFD_Agent/commit/a9620705ed47c7c53dcef7818bda12c2cd80558d))
+
+
 ## v1.0.10 (2026-03-24)
 
 ### Bug Fixes
