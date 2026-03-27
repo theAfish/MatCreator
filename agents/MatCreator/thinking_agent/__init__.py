@@ -1,8 +1,7 @@
-"""Thinking-agent sub-package.
+"""MatCreator agent sub-package.
 
-Exports ``thinking_agent``, the planning-phase orchestrator responsible for
-goal classification, execution-plan drafting, and the user-approval gate
-before handing control to the execution agent.
+Exports ``thinking_agent``, the single LlmAgent that handles planning and
+execution in one conversational loop.
 """
 
 from .agent import thinking_agent

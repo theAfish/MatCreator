@@ -1,31 +1,35 @@
-"""Thinking agent - orchestrates goal classification, plan creation, and approval gating.
+"""MatCreator agent - a single LlmAgent that handles both planning and execution.
 
-Architecture mirrors database_agent / sql_agent:
-  ThinkingAgent (this file)
-    └─ plan_builder_agent  (thinking_agent/planning_agent/agent.py)
-    └─ assessment_agent     (../assessment_agent.py)
-        └─ summarize_agent      (thinking_agent/summarize_agent/agent.py)
+The agent dynamically loads skill context, runs tools, and manages its own
+plan/execution loop in natural conversation. No separate execution agent or
+phase state machine is needed.
 """
 
 from __future__ import annotations
 
 import os
+import logging
+from typing import Dict, Any, List, Optional
+
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
-from google.adk.models import llm_response
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.base_tool import BaseTool
-from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field
 
 from ..constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from .planning_agent.agent import plan_builder_agent
-from .skill import list_skill_name_descriptions, list_guide_metadata, load_guide_content
-from .memory import load_memory
-from .memory import update_memory
+from .skill import (
+    list_skill_name_descriptions,
+    list_guide_metadata,
+    load_guide_content,
+    load_skill_content,
+    _load_skill_registry,
+    Skill,
+)
+from .memory import load_memory, update_memory
 from .workspace_tools import (
     write_workspace_file,
     read_workspace_file,
@@ -36,221 +40,229 @@ from .workspace_tools import (
     run_python_file,
     init_workspace_tool,
 )
-from ..constants import _KNOWLEDGE_PATH
+from ..tools import TOOLSETS
 
-def _load_glossary() -> str:
-    """Load domain glossary from skills/glossary.md for injection into agent prompts."""
-    glossary_path =  _KNOWLEDGE_PATH / "glossary.md"
-    try:
-        with open(os.path.abspath(glossary_path), "r") as f:
-            return f.read()
-    except FileNotFoundError:
-        return ""
-
-_DOMAIN_GLOSSARY = _load_glossary()
+logger = logging.getLogger(__name__)
 
 _model_name = os.environ.get("LLM_MODEL", LLM_MODEL)
 _model_api_key = os.environ.get("LLM_API_KEY", LLM_API_KEY)
 _model_base_url = os.environ.get("LLM_BASE_URL", LLM_BASE_URL)
 
 # ---------------------------------------------------------------------------
-# Workflow classification schema (tool agent)
-# ---------------------------------------------------------------------------
-class WorkflowClassification(BaseModel):
-    """Classification of workflow type based on user intent."""
-    goal: str = Field(
-        ...,
-        description="Single-sentence articulation of the user's goal/intent",
-        max_length=300,
-    )
-    reasoning: str = Field(
-        ...,
-        description="Brief explanation of why you think this way",
-        #max_length=300,
-    )
-
-_CLASSIFICATION_INSTRUCTION = f"""
-You are an agent that determine user goal. 
-
-## Task
-- Infer the user's goal as one concise sentence using the correct domain terminology above.
-- Provide short reasoning explaining which workflow type applies.
-
-## Rule
-Output in JSON format
-"""
-
-_APPROVAL_INSTRUCTIION ="""
-You are the approveal agent that infers user approval for execution plan.
-
-Goal: {goal}
-Plan: {plan}
-Execution summarize: {summarize}
- 
-Task:
-Analyze the user's response and determine:
-Did they approve the plan?
-Do they want modifications?
-Do they need clarification?
-
-Output in json format
-"""
-
-_THINKING_INSTRUCTION = """
-You are the central brain for planning and supervising the computational materials tasks.
-
-You orchestrate planning through tool sub-agents:
-- intent_tool_agent              : determine user's goal
-- plan_builder_agent             : drafts and update ExecutionPlan
-- execute_plan                   : ask user permission to proceed to Execution
-- update_memory(new_entries)     : appends new knowledge to MEMORY.md
-- load_guide_content(guide_name) : fetch the full body of a guide by name
-
-Workspace skill authoring tools (MatClaw):
-- init_workspace_tool            : create .workspace/ and seed with built-in defaults
-- list_workspace_skills          : list skills in the workspace
-- create_skill                   : scaffold a new skill directory + markdown file
-- write_workspace_file           : write any file under the workspace (skill scripts, guides, etc.)
-- read_workspace_file            : read any file from the workspace
-- run_python / run_bash          : execute code — REQUIRES explicit user approval first
-- run_python_file                : execute a workspace Python script — REQUIRES explicit user approval
-
-You keep track of these state to decide what to do:
-- Goal: {goal} 
-- Execution plan: {plan}
-- Execution summarize: {summarize}
-- Available guides: {guides}
-
-
-Approval gate:
-- Always check with user after running `intent_tool_agent`.
-- Call `execute_plan` before moving to execution.
-- If the user requests changes or asks questions, remain in thinking phase.
-- NEVER call run_python, run_bash, or run_python_file without first showing the
-  code/command to the user and confirming they approve.
-"""
-
-# ---------------------------------------------------------------------------
-# Sub-agents used as tools
+# load_skill_context: dynamically injects skill instruction into session state
 # ---------------------------------------------------------------------------
 
-intent_tool_agent = LlmAgent(
-    name="intent_tool_agent",
-    model=LiteLlm(
-        model=_model_name,
-        base_url=_model_base_url,
-        api_key=_model_api_key,
-    ),
-    description="Determine user's goal.",
-    instruction=_CLASSIFICATION_INSTRUCTION,
-    output_schema=WorkflowClassification,
-    disallow_transfer_to_parent=True,
-    disallow_transfer_to_peers=True,
-)
+def load_skill_context(skill_name: str, tool_context: ToolContext) -> dict:
+    """Load the instruction and tool list for a skill into session state.
 
-# before_agent_callback
-def before_agent_callback(callback_context: CallbackContext):
-    """Set environment variables and initialize session state for MatCreator agent."""
-    callback_context.state['approval'] = False
-    callback_context.state.setdefault("summarize",default=None)
-    # load memory
-    callback_context.state["memory"] = load_memory()
-    # load skill
-    skill_summaries = list_skill_name_descriptions()
-    callback_context.state["skills"] = "\n".join(
-        f"- {item['name']}: {item['description']}" for item in skill_summaries
-    ) if skill_summaries else "No skills available."
-    # load guides
-    guide_meta = list_guide_metadata()
-    callback_context.state["guides"] = "\n".join(
-            f"- {g['name']}: {g['description']} (tags: {g['tags']})"
-            for g in guide_meta
-        ) if guide_meta else "No guides available."
-    return None
+    Call this BEFORE executing any step that belongs to a specific skill.
+    The loaded instruction is injected into the agent's prompt via the
+    {active_skill} and {skill_instruction} template variables.
 
-# After tool modifier
-def after_tool_modifier(
-    tool: BaseTool, args: Dict[str, Any], tool_context: ToolContext, tool_response: Dict
-) -> Optional[Dict]:
-    """Inspects/modifies the tool result after execution."""
-    agent_name = tool_context.agent_name
-    tool_name = tool.name
-    print(f"[Callback] After tool call for tool '{tool_name}' in agent '{agent_name}'")
-    print(f"[Callback] Args used: {args}")
-    print(f"[Callback] Original tool_response: {tool_response}")
-
-    # --- Modification Example ---
-    # If the tool was 'get_capital_city' and result is 'Washington, D.C.'
-    if tool_name == 'intent_tool_agent':
-        # schema output is already in dict format
-        tool_context.state['goal'] = tool_response.get('goal')
-        
-    elif tool_name == 'plan_builder_agent':
-        if isinstance(tool_response, str):
-            import json as _json, re as _re
-            _m = _re.search(r'\{[\s\S]*\}', tool_response)
-            try:
-                tool_response = _json.loads(_m.group(0)) if _m else {}
-            except _json.JSONDecodeError:
-                pass
-        tool_context.state['plan'] = tool_response
-        tool_context.state['detailed_steps'] = tool_response
-        
-    
-    elif tool_name == 'summarize_agent':
-        tool_context.state['summarize'] = tool_response
-
-    return None
-
-# After model modfier
-def after_model_modifier(
-    callback_context: CallbackContext, 
-    llm_response: llm_response
-) -> Optional[Dict]:
-    """Inspects/modifies the tool result after execution."""
-    
-    k_list=["phase"]
-    for k in k_list:
-        print(f"[Callback] The current states are {k}:{callback_context.state.get(k)}")
-    return None
-
-# ---------------------------------------------------------------------------
-# ThinkingAgent instance
-# ---------------------------------------------------------------------------
-
-def execute_plan(tool_context: ToolContext) -> dict:
-    """Enter EXECUTION MODE. Only call this AFTER the user has explicitly
-    approved the plan in natural language (e.g. 'yes', 'ok', 'proceed', 'looks good').
-    Do NOT call this if the user is still asking questions or requesting changes.
-    An execution agent with clean context would be spawned after this to carry out the plan.
+    Args:
+        skill_name: Exact skill name as listed in Available skills.
     """
-    #"""Call this function to ask for user approval for execution"""
-    tool_context.state["approval"] = True
+    skill_registry = _load_skill_registry()
+    normalized = (skill_name or "").strip()
+    if not normalized:
+        return {
+            "status": "error",
+            "message": "skill_name is required.",
+            "available_skills": sorted(skill_registry.keys()),
+        }
+
+    selected: Skill | None = skill_registry.get(normalized)
+    if selected is None:
+        lowered = normalized.lower()
+        for name, skill in skill_registry.items():
+            if name.lower() == lowered:
+                selected = skill
+                break
+
+    if selected is None:
+        return {
+            "status": "error",
+            "message": f"Skill '{skill_name}' not found.",
+            "available_skills": sorted(skill_registry.keys()),
+        }
+
+    tool_context.state["active_skill"] = selected.name
+    tool_context.state["skill_instruction"] = selected.instruction
+
     return {
         "status": "ok",
-        "message": "Execution approved",
+        "skill": selected.name,
+        "instruction": selected.instruction,
+        "needed_tools": selected.needed_tools,
+        "message": f"Loaded skill context for '{selected.name}'.",
     }
 
-thinking_agent = LlmAgent(
-    name="thinking_agent",
+
+# ---------------------------------------------------------------------------
+# Inline summarize_agent tool: records step outcomes into session state
+# ---------------------------------------------------------------------------
+
+_SUMMARIZE_TOOL_INSTRUCTION = """
+You summarize key outcomes and extract concrete artifacts from the most recent execution step.
+Use absolute paths for artifacts.
+
+Session state context:
+- goal: {goal}
+- plan: {plan}
+
+Output ONLY a JSON object — no markdown fences, no extra text:
+{{
+  "key_results": "<concise summary of what was produced or learned>",
+  "artifacts": ["<absolute path or ID of important generated files>"],
+  "concise_summary": "<user-facing one-paragraph summary>"
+}}
+"""
+
+_summarize_tool_agent = LlmAgent(
+    name="summarize_agent",
     model=LiteLlm(
         model=_model_name,
         base_url=_model_base_url,
         api_key=_model_api_key,
     ),
     description=(
-        "Thinking-phase orchestrator. Classifies workflow, creates structured execution plans, "
-        "and gates transition to execution on explicit user approval."
+        "Records the outcome of a completed execution step: key results, artifact paths, "
+        "and a concise user-facing summary. Call after each significant step."
     ),
-    instruction=_THINKING_INSTRUCTION,
+    instruction=_SUMMARIZE_TOOL_INSTRUCTION,
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
+)
+
+# ---------------------------------------------------------------------------
+# Instruction
+# ---------------------------------------------------------------------------
+
+_MATCREATOR_INSTRUCTION = """
+You are MatCreator, an AI assistant for computational materials science workflows.
+
+## Context
+- Memory: {memory}
+- Available skills: {skills}
+- Available guides: {guides}
+- Active skill: {active_skill}
+- Skill instruction: {skill_instruction}
+- Summarize: {summarize}
+
+## Your capabilities
+Planning tools:
+- plan_builder_agent             : draft or update a structured ExecutionPlan
+- load_guide_content(guide_name) : fetch the full body of a guide by name
+- load_skill_content(skill_name) : fetch the full instruction of a skill by name
+- update_memory(new_entries)     : persist new knowledge to MEMORY.md
+
+Skill & execution tools:
+- load_skill_context(skill_name) : load a skill's instruction into the active context above
+- summarize_agent                : record the outcome of a completed step
+- run_python(code)               : run Python code in a subprocess
+- run_bash(script)               : run a bash script in a subprocess
+- run_python_file(relative_path) : run a Python script from the workspace
+
+Workspace tools:
+- init_workspace_tool            : initialise the .workspace/ directory
+- list_workspace_skills          : list skills in the workspace
+- create_skill                   : scaffold a new skill
+- write_workspace_file           : write any file under the workspace
+- read_workspace_file            : read any file from the workspace
+
+## Workflow
+1. Understand the user's goal. Ask clarifying questions if needed.
+2. Use plan_builder_agent to draft a clear plan. Show it to the user.
+3. **Before running any code**, always show the exact code/command to the user and
+   wait for explicit confirmation (e.g. "yes", "ok", "proceed").
+4. For each plan step, call load_skill_context(skill_name) first, then follow the
+   injected skill instruction above.
+5. After completing each step, call summarize_agent to record outcomes.
+6. If a step fails, diagnose, propose a fix, and confirm with the user before retrying.
+
+## Rules
+- NEVER run code without explicit user approval.
+- Always call load_skill_context before executing a domain-specific step.
+- Keep responses concise; include key results with absolute paths when relevant.
+- When you encounter an error, quote the exact message and propose concrete solutions.
+"""
+
+# ---------------------------------------------------------------------------
+# before_agent_callback: inject dynamic context into session state
+# ---------------------------------------------------------------------------
+
+def before_agent_callback(callback_context: CallbackContext) -> None:
+    """Refresh memory, skills, and guides in session state each invocation."""
+    callback_context.state["memory"] = load_memory()
+
+    skill_summaries = list_skill_name_descriptions()
+    callback_context.state["skills"] = "\n".join(
+        f"- {item['name']}: {item['description']}" for item in skill_summaries
+    ) if skill_summaries else "No skills available."
+
+    guide_meta = list_guide_metadata()
+    callback_context.state["guides"] = "\n".join(
+        f"- {g['name']}: {g['description']} (tags: {g['tags']})"
+        for g in guide_meta
+    ) if guide_meta else "No guides available."
+
+    callback_context.state.setdefault("active_skill", "none")
+    callback_context.state.setdefault("skill_instruction", "No skill loaded yet. Call load_skill_context before executing a domain step.")
+
+    return None
+
+# ---------------------------------------------------------------------------
+# after_tool_callback: persist plan and summarize updates
+# ---------------------------------------------------------------------------
+
+def after_tool_callback(
+    tool: BaseTool,
+    args: Dict[str, Any],
+    tool_context: ToolContext,
+    tool_response: Dict,
+) -> Optional[Dict]:
+    """Persist plan returned by plan_builder_agent and summarize from summarize_agent."""
+    tool_name = tool.name
+
+    if tool_name == "plan_builder_agent":
+        if isinstance(tool_response, str):
+            import json as _json
+            import re as _re
+            _m = _re.search(r"\{[\s\S]*\}", tool_response)
+            try:
+                tool_response = _json.loads(_m.group(0)) if _m else {}
+            except _json.JSONDecodeError:
+                pass
+        tool_context.state["plan"] = tool_response
+
+    elif tool_name == "summarize_agent":
+        tool_context.state["summarize"] = tool_response
+
+    return None
+
+# ---------------------------------------------------------------------------
+# MatCreator agent instance
+# ---------------------------------------------------------------------------
+
+thinking_agent = LlmAgent(
+    name="MatCreator",
+    model=LiteLlm(
+        model=_model_name,
+        base_url=_model_base_url,
+        api_key=_model_api_key,
+    ),
+    description=(
+        "MatCreator: plans and executes computational materials science workflows "
+        "through natural conversation with the user."
+    ),
+    instruction=_MATCREATOR_INSTRUCTION,
     tools=[
-        AgentTool(intent_tool_agent),
         AgentTool(plan_builder_agent),
+        AgentTool(_summarize_tool_agent),
+        FunctionTool(load_skill_context),
+        FunctionTool(load_guide_content),
+        FunctionTool(load_skill_content),
         update_memory,
-        FunctionTool(execute_plan),
-        # Workspace / MatClaw skill authoring tools
         FunctionTool(init_workspace_tool),
         FunctionTool(list_workspace_skills),
         FunctionTool(create_skill),
@@ -259,9 +271,8 @@ thinking_agent = LlmAgent(
         FunctionTool(run_python),
         FunctionTool(run_bash),
         FunctionTool(run_python_file),
-        FunctionTool(load_guide_content),
+        *TOOLSETS,
     ],
     before_agent_callback=before_agent_callback,
-    after_tool_callback=after_tool_modifier,
-    after_model_callback=after_model_modifier
+    after_tool_callback=after_tool_callback,
 )
