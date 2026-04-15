@@ -10,22 +10,7 @@ servers are skipped gracefully.
 import socket
 import logging
 from urllib.parse import urlparse
-from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.mcp_tool import McpToolset
-
-from .thinking_agent.workspace_tools import (
-    write_workspace_file,
-    read_workspace_file,
-    list_workspace_skills,
-    create_skill,
-    run_python,
-    run_bash,
-    run_python_file,
-    init_workspace_tool,
-)
-
-from .util_tools import show_plot, show_structure, show_artifact
-
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
 
 
@@ -43,26 +28,12 @@ def _is_sse_server_active(url: str, timeout: float = 2.0) -> bool:
 
 
 ## All tool sets
-TOOLSETS = []
-
-TOOLSETS.extend(
-    [write_workspace_file,
-    read_workspace_file,
-    list_workspace_skills,
-    create_skill,
-    run_python,
-    run_bash,
-    run_python_file,
-    init_workspace_tool,
-    show_plot,
-    show_structure,
-    show_artifact]
-)
+MCP_TOOLSETS = []
 
 # Database toolset
 _url = "http://localhost:50001/sse"
 if _is_sse_server_active(_url):
-    TOOLSETS.append(
+    MCP_TOOLSETS.append(
         McpToolset(
             connection_params=SseServerParams(
                 url=_url,
@@ -74,7 +45,7 @@ if _is_sse_server_active(_url):
 # DPA toolset
 _url = "http://localhost:50002/sse"
 if _is_sse_server_active(_url):
-    TOOLSETS.append(
+    MCP_TOOLSETS.append(
         McpToolset(
             connection_params=SseServerParams(
                 url=_url,
@@ -86,7 +57,7 @@ if _is_sse_server_active(_url):
 # STRUCTURE toolset
 _url = "http://localhost:50004/sse"
 if _is_sse_server_active(_url):
-    TOOLSETS.append(
+    MCP_TOOLSETS.append(
         McpToolset(
             connection_params=SseServerParams(
                 url=_url,
@@ -98,7 +69,7 @@ if _is_sse_server_active(_url):
 # ABACUS toolset
 _url = "http://localhost:50003/sse"
 if _is_sse_server_active(_url):
-    TOOLSETS.append(
+    MCP_TOOLSETS.append(
         McpToolset(
             connection_params=SseServerParams(
                 url=_url,
@@ -110,7 +81,7 @@ if _is_sse_server_active(_url):
 # VASP toolset
 _url = "http://localhost:50005/sse"
 if _is_sse_server_active(_url):
-    TOOLSETS.append(
+    MCP_TOOLSETS.append(
         McpToolset(
             connection_params=SseServerParams(
                 url=_url,
@@ -129,7 +100,7 @@ if _is_sse_server_active(_url):
 # MatterGen toolset
 _url = "http://localhost:50006/sse"
 if _is_sse_server_active(_url):
-    TOOLSETS.append(
+    MCP_TOOLSETS.append(
         McpToolset(
             connection_params=SseServerParams(
                 url=_url,

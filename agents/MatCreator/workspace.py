@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from .constants import _KNOWLEDGE_PATH
+from .constants import _AGENT_PATH
 
 
 
@@ -43,6 +43,16 @@ def workspace_memory_path() -> Path:
     return WORKSPACE_ROOT / "MEMORY.md"
 
 
+def get_session_workdir(session_id: str) -> Path:
+    return WORKSPACE_ROOT / "sessions" / session_id
+
+
+def init_session_workdir(session_id: str) -> Path:
+    d = get_session_workdir(session_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 # ---------------------------------------------------------------------------
 # Initialisation
 # ---------------------------------------------------------------------------
@@ -66,13 +76,12 @@ def init_workspace(force: bool = False) -> str:
     copied: list[str] = []
 
     # Copy built-in flat skills → workspace flat skills (do not overwrite)
-    builtin_skills = _KNOWLEDGE_PATH / "skills"
-    for src in sorted(builtin_skills.glob("*.md")):
-        dst = skills_dir / src.name
-        if not dst.exists() or force:
-            shutil.copy2(src, dst)
-            copied.append(f"skills/{src.name}")
-
+    builtin_skills = _AGENT_PATH / "skills"
+    #for src in sorted(builtin_skills.glob("*.md")):
+    #    dst = skills_dir / src.name
+    #    if not dst.exists() or force:
+    #        shutil.copy2(src, dst)
+    #        copied.append(f"skills/{src.name}")
     # Copy built-in subdir skills → workspace subdir skills (do not overwrite)
     for skill_subdir in sorted(builtin_skills.iterdir()):
         if not skill_subdir.is_dir():
@@ -88,7 +97,7 @@ def init_workspace(force: bool = False) -> str:
                 copied.append(f"skills/{rel}")
 
     # Copy built-in guides → workspace guides (do not overwrite)
-    builtin_guides = _KNOWLEDGE_PATH / "guides"
+    builtin_guides = _AGENT_PATH / "guides"
     for src in sorted(builtin_guides.glob("*.md")):
         dst = guides_dir / src.name
         if not dst.exists() or force:

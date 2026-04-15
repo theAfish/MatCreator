@@ -19,7 +19,9 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from ..workspace import get_workspace_root, workspace_skills_dir
+from google.adk.tools.tool_context import ToolContext
+
+from ..workspace import get_workspace_root, get_session_workdir, workspace_skills_dir
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ def create_skill(
 _EXEC_TIMEOUT = 3600  # seconds
 
 
-def run_python(code: str) -> str:
+def run_python(code: str, tool_context: ToolContext) -> str:
     """Execute a Python code snippet and return its stdout/stderr.
 
     IMPORTANT: Only call this tool after the user has explicitly approved the
@@ -168,11 +170,16 @@ def run_python(code: str) -> str:
     Returns:
         Combined stdout and stderr output, truncated to 4 000 characters.
     """
+    cwd = None
+    session_id = tool_context.state.get("session_id")
+    if session_id:
+        cwd = str(get_session_workdir(session_id))
     result = subprocess.run(
         ["python", "-c", code],
         capture_output=True,
         text=True,
         timeout=_EXEC_TIMEOUT,
+        cwd=cwd,
     )
     output = result.stdout + result.stderr
     if len(output) > 4000:
@@ -180,7 +187,7 @@ def run_python(code: str) -> str:
     return output or "(no output)"
 
 
-def run_bash(script: str) -> str:
+def run_bash(script: str, tool_context: ToolContext) -> str:
     """Execute a bash script snippet and return its stdout/stderr.
 
     IMPORTANT: Only call this tool after the user has explicitly approved the
@@ -192,12 +199,17 @@ def run_bash(script: str) -> str:
     Returns:
         Combined stdout and stderr output, truncated to 4 000 characters.
     """
+    cwd = None
+    session_id = tool_context.state.get("session_id")
+    if session_id:
+        cwd = str(get_session_workdir(session_id))
     try:
         result = subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
             text=True,
             timeout=_EXEC_TIMEOUT,
+            cwd=cwd,
         )
         output = result.stdout + result.stderr
     except subprocess.TimeoutExpired as exc:

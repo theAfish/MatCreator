@@ -20,29 +20,27 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.base_tool import BaseTool
 
-from ..constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from ...constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from .trajectory import append_trajectory_entry
-from .planning_agent.agent import plan_builder_agent
-from .skill import (
-    list_skill_name_descriptions,
-    list_guide_metadata,
-    load_guide_content,
-    load_skill_content,
-    _load_skill_registry,
-    Skill,
-)
+from .planning import validate_plan
+#from .skill import (
+#    list_skill_name_descriptions,
+#    list_guide_metadata,
+#    load_guide_content,
+#    load_skill_content,
+#)
+from ...skill import ALL_SKILLS, ALL_SKILLS_TOOLSET, refresh_skills
+from ...guide import ALL_GUIDES
 from .memory import update_memory, read_memory
-from .workspace_tools import (
-    write_workspace_file,
-    read_workspace_file,
-    list_workspace_skills,
-    create_skill,
-    run_python,
-    run_bash,
-    run_python_file,
+from ...tools.workspace_tools import (
     init_workspace_tool,
 )
-from ..tools import TOOLSETS
+from ...tools.util_tools import (
+    show_artifact,
+    show_plot,
+    show_structure
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,38 +62,35 @@ def load_skill_context(skill_name: str, tool_context: ToolContext) -> dict:
     Args:
         skill_name: Exact skill name as listed in Available skills.
     """
-    skill_registry = _load_skill_registry()
     normalized = (skill_name or "").strip()
     if not normalized:
         return {
             "status": "error",
             "message": "skill_name is required.",
-            "available_skills": sorted(skill_registry.keys()),
+            "available_skills": sorted(s.name for s in ALL_SKILLS),
         }
 
-    selected: Skill | None = skill_registry.get(normalized)
+    selected = next((s for s in ALL_SKILLS if s.name == normalized), None)
     if selected is None:
         lowered = normalized.lower()
-        for name, skill in skill_registry.items():
-            if name.lower() == lowered:
-                selected = skill
-                break
+        selected = next((s for s in ALL_SKILLS if s.name.lower() == lowered), None)
 
     if selected is None:
         return {
             "status": "error",
             "message": f"Skill '{skill_name}' not found.",
-            "available_skills": sorted(skill_registry.keys()),
+            "available_skills": sorted(s.name for s in ALL_SKILLS),
         }
 
     tool_context.state["active_skill"] = selected.name
-    tool_context.state["skill_instruction"] = selected.instruction
+    tool_context.state["skill_instruction"] = selected.instructions
 
+    needed_tools = selected.frontmatter.metadata.get("tools", [])
     return {
         "status": "ok",
         "skill": selected.name,
-        "instruction": selected.instruction,
-        "needed_tools": selected.needed_tools,
+        "instruction": selected.instructions,
+        "needed_tools": needed_tools,
         "message": f"Loaded skill context for '{selected.name}'.",
     }
 
@@ -107,6 +102,74 @@ def clear_current_skill(tool_context: ToolContext) -> dict:
     tool_context.state["active_skill"] = None
     tool_context.state["skill_instruction"] = None
     return {"status": "ok", "message": "Active skill context cleared."}
+
+
+def load_guide(guide_name: str) -> dict:
+    """Return the full instruction content for a guide.
+
+    Call this before planning when the user's goal matches a known guide.
+
+    Args:
+        guide_name: Exact guide name as listed in Available guides.
+    """
+    normalized = (guide_name or "").strip()
+    if not normalized:
+        return {
+            "status": "error",
+            "message": "guide_name is required.",
+            "available_guides": sorted(g.name for g in ALL_GUIDES),
+        }
+
+    selected = next((g for g in ALL_GUIDES if g.name == normalized), None)
+    if selected is None:
+        lowered = normalized.lower()
+        selected = next((g for g in ALL_GUIDES if g.name.lower() == lowered), None)
+
+    if selected is None:
+        return {
+            "status": "error",
+            "message": f"Guide '{guide_name}' not found.",
+            "available_guides": sorted(g.name for g in ALL_GUIDES),
+        }
+
+    return {
+        "status": "ok",
+        "guide": selected.name,
+        "instruction": selected.instructions,
+    }
+
+
+def confirm_plan_and_start_execution(tool_context: ToolContext) -> dict:
+    """Signal that the user has approved the plan and execution should begin.
+
+    Call this when the user explicitly confirms they want to proceed with the plan
+    (e.g. "yes", "proceed", "go ahead").  The orchestrator will then delegate each
+    plan step to the execution agent — do NOT execute steps yourself after calling this.
+    """
+    tool_context.state["execution_approved"] = True
+    tool_context.state["current_step_index"] = 0
+    return {
+        "status": "ok",
+        "message": "Execution approved. The orchestrator will now run each step via the execution agent.",
+    }
+
+
+def request_skill_testing(skill_or_description: str, tool_context: ToolContext) -> dict:
+    """Request the tester agent to create or validate a skill.
+
+    Call this when the user asks to create a new skill or test an existing one.
+    The orchestrator will delegate to the tester agent on the next routing decision.
+
+    Args:
+        skill_or_description: Name of an existing skill to test, or a description
+            of the new skill to create (e.g. "a skill for VASP band structure calculation").
+    """
+    tool_context.state["testing_requested"] = True
+    tool_context.state["tester_request"] = skill_or_description
+    return {
+        "status": "ok",
+        "message": f"Skill testing requested: {skill_or_description}",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -195,29 +258,28 @@ intent_tool_agent = LlmAgent(
 
 _MATCREATOR_INSTRUCTION = """
 You are MatCreator, an AI assistant for computational materials science workflows.
+Your role here is **planning only** — a dedicated execution agent handles the actual steps.
 
 ## Context
 - Available skills: {skills}
 - Available guides: {guides}
 - Goal: {goal}
 - Plan: {plan}
-- Active skill: {active_skill}
-- Skill instruction: {skill_instruction}
 - Summarize: {summarize}
 
 ## Default workflow
-1. Understand the user's goal by `user_intent`. Call `read_memory` to recall past context before planning.
-2. Use `plan_builder_agent` to draft a clear plan. Show it to the user.
-3. **Before executing the plan**, always wait for explicit confirmation (e.g. "yes", "ok", "proceed").
-4. For each plan step, call `load_skill_context(skill_name)` first, then follow the
-   injected skill instruction above.
-5. After completing each step, call `summarize_agent` to record outcomes.
-6. If a step fails, diagnose, propose a fix, and confirm with the user before retrying.
+1. Understand the user's goal with `user_intent`. Call `read_memory` to recall past context.
+2. If the user's goal matches one of the Available guides, call `load_guide` to inject its workflow instructions before planning.
+3. Draft a clear execution plan yourself, then call `validate_plan` to validate and commit it. Show the plan to the user.
+4. **Wait for explicit user confirmation** (e.g. "yes", "ok", "proceed") before proceeding.
+   When the user confirms, call `confirm_plan_and_start_execution` — do NOT execute steps yourself.
+5. If the user asks to create or test a skill, call `request_skill_testing(description)`.
 
 ## Rules
-- NEVER run code without explicit user approval.
-- Always call `load_skill_context` before executing a domain-specific step.
-- Keep responses concise; include key results with absolute paths when relevant.
+- NEVER load skill context or run tools to execute plan steps — that is the execution agent's job.
+- After `confirm_plan_and_start_execution`, simply inform the user that execution is starting.
+- For skill creation/testing requests, always call `request_skill_testing` before responding.
+- Keep responses concise; reference absolute file paths where relevant.
 - When you encounter an error, quote the exact message and propose concrete solutions.
 """
 
@@ -241,17 +303,13 @@ def before_agent_callback(callback_context: CallbackContext) -> None:
         if key not in state:
             callback_context.state[key] = default
     
-    skill_summaries = list_skill_name_descriptions()
-    logger.info("Loaded skill summaries: %s", skill_summaries)
     callback_context.state["skills"] = "\n".join(
-        f"- {item['name']}: {item['description']}" for item in skill_summaries
-    ) if skill_summaries else "No skills available."
+        f"- {s.name}: {s.description}" for s in ALL_SKILLS
+    ) if ALL_SKILLS else "No skills available."
 
-    guide_meta = list_guide_metadata()
     callback_context.state["guides"] = "\n".join(
-        f"- {g['name']}: {g['description']} (tags: {g['tags']})"
-        for g in guide_meta
-    ) if guide_meta else "No guides available."
+        f"- {g.name}: {g.description}" for g in ALL_GUIDES
+    ) if ALL_GUIDES else "No guides available."
 
     return None
 
@@ -265,10 +323,10 @@ def after_tool_callback(
     tool_context: ToolContext,
     tool_response: Dict,
 ) -> Optional[Dict]:
-    """Persist plan returned by plan_builder_agent and summarize from summarize_agent."""
+    """Persist summarize updates; plan is persisted directly by validate_plan."""
     tool_name = tool.name
 
-    if tool_name == "plan_builder_agent":
+    if tool_name == "user_intent":
         if isinstance(tool_response, str):
             import json as _json
             import re as _re
@@ -277,7 +335,8 @@ def after_tool_callback(
                 tool_response = _json.loads(_m.group(0)) if _m else {}
             except _json.JSONDecodeError:
                 pass
-        tool_context.state["plan"] = tool_response
+        if isinstance(tool_response, dict) and "goal" in tool_response:
+            tool_context.state["goal"] = tool_response["goal"]
 
     elif tool_name == "summarize_agent":
         tool_context.state["summarize"] = tool_response
@@ -317,24 +376,20 @@ thinking_agent = LlmAgent(
     ),
     instruction=_MATCREATOR_INSTRUCTION,
     tools=[
-        AgentTool(plan_builder_agent),
+        FunctionTool(validate_plan),
         AgentTool(_summarize_tool_agent),
         AgentTool(intent_tool_agent),
-        FunctionTool(load_skill_context),
-        FunctionTool(clear_current_skill),
-        FunctionTool(load_guide_content),
-        FunctionTool(load_skill_content),
+        FunctionTool(confirm_plan_and_start_execution),
+        FunctionTool(request_skill_testing),
+        FunctionTool(load_guide),
         FunctionTool(read_memory),
-        update_memory,
+        FunctionTool(update_memory),
         FunctionTool(init_workspace_tool),
-        FunctionTool(list_workspace_skills),
-        FunctionTool(create_skill),
-        FunctionTool(write_workspace_file),
-        FunctionTool(read_workspace_file),
-        FunctionTool(run_python),
-        FunctionTool(run_bash),
-        #FunctionTool(run_python_file),
-        *TOOLSETS,
+        FunctionTool(refresh_skills),
+        show_artifact,
+        show_plot,
+        show_structure,
+        ALL_SKILLS_TOOLSET
     ],
     before_agent_callback=before_agent_callback,
     after_tool_callback=after_tool_callback,
