@@ -60,7 +60,7 @@ async def serve_workspace_file(path: str = Query(..., description="Absolute or w
     ws_root = get_workspace_root().resolve()
     p = Path(path)
     resolved = p.resolve() if p.is_absolute() else (ws_root / p).resolve()
-    if not str(resolved).startswith(str(ws_root)):
+    if not resolved.is_relative_to(ws_root):
         raise HTTPException(status_code=403, detail="Access denied: path is outside workspace")
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="File not found")
@@ -80,7 +80,7 @@ async def view_structure(path: str = Query(..., description="Absolute or workspa
     ws_root = get_workspace_root().resolve()
     p = Path(path)
     resolved = p.resolve() if p.is_absolute() else (ws_root / p).resolve()
-    if not str(resolved).startswith(str(ws_root)):
+    if not resolved.is_relative_to(ws_root):
         raise HTTPException(status_code=403, detail="Access denied: path is outside workspace")
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="File not found")
