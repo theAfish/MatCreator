@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools>=65.5.0", "wheel"]
+requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]

@@ -40,8 +40,21 @@
               </div>
               <span class="graph-status" id="graph-status">idle</span>
             </div>
-            <div id="agent-graph" class="graph-canvas"></div>
+            <div class="graph-viewport" id="graph-viewport">
+              <div class="graph-surface" id="graph-surface">
+                <div id="agent-graph" class="graph-canvas"></div>
+              </div>
+            </div>
           </section>
+          <div
+            class="panel-resizer"
+            id="graph-resizer"
+            data-target="graph-viewport"
+            tabindex="0"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize agent graph height"
+          ></div>
           <div class="graph-detail hidden" id="graph-detail">
             <div class="detail-header">
               <span id="detail-label">Node</span>
@@ -80,6 +93,15 @@
               </div>
             </div>
           </div>
+          <div
+            class="panel-resizer hidden"
+            id="detail-resizer"
+            data-target="graph-detail"
+            tabindex="0"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize sub-agent context height"
+          ></div>
 
           <div class="structure-viewer hidden" id="structure-viewer">
             <div class="structure-viewer-header">
@@ -91,6 +113,15 @@
             </div>
             <div id="sv-canvas" class="sv-canvas"></div>
           </div>
+          <div
+            class="panel-resizer hidden"
+            id="structure-resizer"
+            data-target="structure-viewer"
+            tabindex="0"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize structure viewer height"
+          ></div>
         </div>
 
         <!-- Centre: Chat -->

@@ -13,6 +13,7 @@ const state = {
   sessionId: `session-${Math.floor(Date.now() / 1000)}`,
   userId: localStorage.getItem("mat_userId") || "",
   sessionReady: false,
+  structure3dViewer: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -26,10 +27,15 @@ const sessionIdEl = document.getElementById("session-id");
 const sessionListEl = document.getElementById("session-list");
 const resetBtn = document.getElementById("reset-session");
 const refreshSessionsBtn = document.getElementById("refresh-sessions");
+const graphViewport = document.getElementById("graph-viewport");
+const graphDetail = document.getElementById("graph-detail");
 const structureViewer = document.getElementById("structure-viewer");
 const svCanvas = document.getElementById("sv-canvas");
 const svMeta = document.getElementById("sv-meta");
 const svClose = document.getElementById("sv-close");
+const graphResizer = document.getElementById("graph-resizer");
+const detailResizer = document.getElementById("detail-resizer");
+const structureResizer = document.getElementById("structure-resizer");
 const graphStatusEl = document.getElementById("graph-status");
 const loginModal = document.getElementById("login-modal");
 const loginInput = document.getElementById("login-input");
@@ -60,13 +66,28 @@ const STATUS_COLORS = {
   idle:             { bg: "#374151", border: "#4B5563", font: "#9CA3AF" },
 };
 
+const MOBILE_LAYOUT_QUERY = window.matchMedia("(max-width: 900px)");
+const PANEL_HEIGHT_DEFAULTS = {
+  "graph-viewport": 660,
+  "graph-detail": 220,
+  "structure-viewer": 320,
+};
+const PANEL_HEIGHT_BOUNDS = {
+  "graph-viewport": { min: 220, max: 1200 },
+  "graph-detail": { min: 110, max: 600 },
+  "structure-viewer": { min: 140, max: 900 },
+};
+
 class AgentGraphView {
   constructor(containerId) {
     this._container = document.getElementById(containerId);
+    this._surfaceEl = document.getElementById("graph-surface");
     this._nodes = new DataSet([]);
     this._edges = new DataSet([]);
     this._network = null;
     this._pollInterval = null;
+    this._didInitialFit = false;
+    this._pendingFit = true;
     this._detailEl = document.getElementById("graph-detail");
     this._detailLabel = document.getElementById("detail-label");
     this._detailStatus = document.getElementById("detail-status");
@@ -111,6 +132,7 @@ class AgentGraphView {
         hover: true,
         tooltipDelay: 200,
         dragNodes: true,
+        dragView: true,
         zoomView: true,
       },
     };
@@ -198,12 +220,39 @@ class AgentGraphView {
     return levels;
   }
 
+  _resizeSurface(levels) {
+    if (!this._surfaceEl) return;
+
+    const nodesPerLevel = new Map();
+    Object.values(levels).forEach((lvl) => {
+      const curr = nodesPerLevel.get(lvl) || 0;
+      nodesPerLevel.set(lvl, curr + 1);
+    });
+
+    const maxLevel = Math.max(0, ...Object.values(levels));
+    const maxBreadth = Math.max(1, ...nodesPerLevel.values());
+
+    const targetWidth = Math.max(620, Math.min(3200, maxBreadth * 160));
+    const targetHeight = Math.max(420, Math.min(4200, (maxLevel + 1) * 125));
+
+    this._surfaceEl.style.width = `${targetWidth}px`;
+    this._surfaceEl.style.height = `${targetHeight}px`;
+  }
+
+  _fitGraph() {
+    if (!this._network || this._nodes.length === 0) return;
+    this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+    this._didInitialFit = true;
+    this._pendingFit = false;
+  }
+
   update(graphData) {
     if (!graphData || typeof graphData.nodes !== "object") return;
 
     const rawNodes = Object.values(graphData.nodes);
     this._nodeData = graphData.nodes;
     const levels = this._computeLevels(rawNodes, graphData.edges || []);
+    this._resizeSurface(levels);
 
     rawNodes.forEach((raw) => {
       const vis = this._visNode(raw);
@@ -223,8 +272,8 @@ class AgentGraphView {
       }
     });
 
-    if (rawNodes.length > 0) {
-      this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+    if (rawNodes.length > 0 && (!this._didInitialFit || this._pendingFit)) {
+      this._fitGraph();
     }
   }
 
@@ -257,6 +306,9 @@ class AgentGraphView {
     this._nodes.clear();
     this._edges.clear();
     this._nodeData = {};
+    this._didInitialFit = false;
+    this._pendingFit = true;
+    this._resizeSurface([], { 0: 1 });
     this._hideDetail();
     this._setStatus("idle");
     this.stopPolling();
@@ -372,14 +424,172 @@ class AgentGraphView {
     }
 
     this._detailEl.classList.remove("hidden");
+    syncPanelResizerVisibility();
   }
 
   _hideDetail() {
     this._detailEl.classList.add("hidden");
+    syncPanelResizerVisibility();
+  }
+
+  notifyLayoutChanged() {
+    if (!this._network) return;
+    this._network.redraw();
   }
 }
 
 const agentGraph = new AgentGraphView("agent-graph");
+
+// ---------------------------------------------------------------------------
+// Left-panel resizing
+// ---------------------------------------------------------------------------
+
+function isMobileLayout() {
+  return MOBILE_LAYOUT_QUERY.matches;
+}
+
+function panelStorageKey(targetId) {
+  const user = state.userId || "anon";
+  return `mat_panel_height_${user}_${targetId}`;
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function getTargetHeight(targetEl) {
+  return Math.round(targetEl.getBoundingClientRect().height);
+}
+
+function applyTargetHeight(targetEl, heightPx) {
+  if (!targetEl) return;
+  const bounds = PANEL_HEIGHT_BOUNDS[targetEl.id];
+  if (!bounds) return;
+  targetEl.style.height = `${clamp(heightPx, bounds.min, bounds.max)}px`;
+}
+
+function persistTargetHeight(targetEl) {
+  if (!targetEl) return;
+  localStorage.setItem(panelStorageKey(targetEl.id), String(getTargetHeight(targetEl)));
+}
+
+function applyStoredPanelHeights() {
+  for (const [targetId, fallback] of Object.entries(PANEL_HEIGHT_DEFAULTS)) {
+    const el = document.getElementById(targetId);
+    if (!el) continue;
+    if (isMobileLayout()) {
+      el.style.removeProperty("height");
+      continue;
+    }
+    const raw = localStorage.getItem(panelStorageKey(targetId));
+    const parsed = raw ? Number(raw) : fallback;
+    const nextHeight = Number.isFinite(parsed) ? parsed : fallback;
+    applyTargetHeight(el, nextHeight);
+  }
+}
+
+function refreshGraphAndStructureLayout() {
+  agentGraph.notifyLayoutChanged();
+  if (state.structure3dViewer && !structureViewer.classList.contains("hidden")) {
+    try {
+      state.structure3dViewer.resize();
+      state.structure3dViewer.render();
+    } catch (_) {
+      // ignore transient resize/render issues
+    }
+  }
+}
+
+function syncPanelResizerVisibility() {
+  const hideAll = isMobileLayout();
+
+  if (graphResizer) {
+    graphResizer.classList.toggle("hidden", hideAll);
+  }
+
+  if (detailResizer) {
+    const detailHidden = graphDetail.classList.contains("hidden");
+    detailResizer.classList.toggle("hidden", hideAll || detailHidden);
+  }
+
+  if (structureResizer) {
+    const structureHidden = structureViewer.classList.contains("hidden");
+    structureResizer.classList.toggle("hidden", hideAll || structureHidden);
+  }
+}
+
+function initPanelResizer(handleEl, targetEl) {
+  if (!handleEl || !targetEl) return;
+
+  const keyStep = 16;
+
+  const commit = () => {
+    persistTargetHeight(targetEl);
+    refreshGraphAndStructureLayout();
+  };
+
+  const resizeBy = (delta) => {
+    const curr = getTargetHeight(targetEl);
+    applyTargetHeight(targetEl, curr + delta);
+    refreshGraphAndStructureLayout();
+  };
+
+  handleEl.addEventListener("pointerdown", (e) => {
+    if (isMobileLayout() || handleEl.classList.contains("hidden")) return;
+    e.preventDefault();
+
+    const startY = e.clientY;
+    const startHeight = getTargetHeight(targetEl);
+    handleEl.classList.add("resizing");
+    handleEl.setPointerCapture(e.pointerId);
+
+    const onMove = (moveEvt) => {
+      const dy = moveEvt.clientY - startY;
+      applyTargetHeight(targetEl, startHeight + dy);
+      refreshGraphAndStructureLayout();
+    };
+
+    const onUp = () => {
+      handleEl.classList.remove("resizing");
+      handleEl.removeEventListener("pointermove", onMove);
+      handleEl.removeEventListener("pointerup", onUp);
+      handleEl.removeEventListener("pointercancel", onUp);
+      commit();
+    };
+
+    handleEl.addEventListener("pointermove", onMove);
+    handleEl.addEventListener("pointerup", onUp);
+    handleEl.addEventListener("pointercancel", onUp);
+  });
+
+  handleEl.addEventListener("keydown", (e) => {
+    if (isMobileLayout() || handleEl.classList.contains("hidden")) return;
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      resizeBy(-keyStep);
+      commit();
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      resizeBy(keyStep);
+      commit();
+    }
+  });
+}
+
+function initPanelResizers() {
+  applyStoredPanelHeights();
+  initPanelResizer(graphResizer, graphViewport);
+  initPanelResizer(detailResizer, graphDetail);
+  initPanelResizer(structureResizer, structureViewer);
+  syncPanelResizerVisibility();
+
+  MOBILE_LAYOUT_QUERY.addEventListener("change", () => {
+    applyStoredPanelHeights();
+    syncPanelResizerVisibility();
+    refreshGraphAndStructureLayout();
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Login / username management
@@ -400,6 +610,7 @@ function applyUsername(name) {
   localStorage.setItem("mat_userId", name);
   userDisplay.textContent = name;
   hideLoginModal();
+  applyStoredPanelHeights();
   loadSessions();
 }
 
@@ -993,6 +1204,7 @@ async function sendMessage(message) {
 
 async function openViewer(item) {
   structureViewer.classList.remove("hidden");
+  syncPanelResizerVisibility();
   svCanvas.innerHTML = '<div style="color:var(--muted);padding:16px;font-size:13px">Loading…</div>';
   svMeta.textContent = "";
 
@@ -1004,6 +1216,7 @@ async function openViewer(item) {
     svCanvas.innerHTML = "";
 
     const viewer = $3Dmol.createViewer(svCanvas, { backgroundColor: "0x06080f" });
+    state.structure3dViewer = viewer;
     viewer.addModel(data.xyz, "xyz");
     viewer.setStyle({}, { sphere: { scale: 0.3 }, stick: { radius: 0.15 } });
 
@@ -1027,6 +1240,7 @@ async function openViewer(item) {
 
     viewer.zoomTo();
     viewer.render();
+    refreshGraphAndStructureLayout();
 
     svMeta.textContent =
       `${data.formula}  ·  ${data.n_atoms} atoms${data.periodic ? "  ·  periodic" : ""}`;
@@ -1038,8 +1252,12 @@ async function openViewer(item) {
 
 svClose.addEventListener("click", () => {
   structureViewer.classList.add("hidden");
+  syncPanelResizerVisibility();
+  state.structure3dViewer = null;
   svCanvas.innerHTML = "";
 });
+
+initPanelResizers();
 
 // ---------------------------------------------------------------------------
 // Event listeners
