@@ -31,6 +31,44 @@ This writes `~/.matcreator/config.yaml` with the `project_root` path, so the
 CLI can locate the `agents/` directory even when installed into site-packages.
 You can also set the `MATCREATOR` environment variable instead.
 
+## Vite Frontend Requirements
+
+This project includes a frontend interface. The frontend depends on `node`, `npm`, and the local `vite` dev server.
+
+### Install NVM
+
+Use NVM to manage Node.js.
+
+```bash
+# Install nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.bashrc
+
+# Verify installation:
+nvm --version
+```
+
+### Install Node.js
+```bash
+nvm install 22
+nvm use 22
+nvm alias default 22
+```
+
+Verify the installation
+```bash
+node -v
+npm -v
+```
+
+### Install frontend dependencies
+
+```bash
+cd web/vite-frontend
+npm install
+npm run dev
+```
+
 ### Recommended Workflow: WSL + uv for Virtual Environment Deployment
 
 We highly recommend using WSL (Windows Subsystem for Linux) with uv to deploy local development virtual environments. WSL provides a native Linux environment seamlessly integrated with Windows, enabling access to Linux tools. As a fast, lightweight Python package manager, uv creates isolated environments to avoid dependency conflicts, ideal for Python applications like Streamlit.
@@ -68,9 +106,20 @@ An example content of `.env`:
 LLM_MODEL= "MODEL_TYPE"
 LLM_API_KEY="API_KEYS"
 LLM_BASE_URL="BASE_URL"
+EMBEDDING_MODEL="EMBEDDING_MODEL_TYPE"        
 
 # SKILL_RELATED_ENV
-# ...
+CGCNN_ROOT=user/cgcnn                         # CGCNN project directory
+MATTERGEN_ENV=user/../.mattergen              # MATTERGEN virtual environment
+TAVILY_API_KEY=""
+BOHRIUM_MAT_IMAGE=""                          # MATTERGEN and MATTERSIM IMAGE
+BOHRIUM_MAT_MACHINE=""                        # MATTERGEN and MATTERSIM IMAGE
+eval_reference="user/../reference_MP2020correction.gz"
+mattersim_model="user/../mattersim-v1.0.0-5M.pth"
+mattergen_model="user/../mattergen/checkpoints"
+BOHRIUM_VASP_IMAGE=""
+BOHRIUM_VASP_MACHINE=""
+...
 ```
 
 If you prefer different LLM models for sub-agents, you can override the default setting at the `.env` file within sub-agents directories. 
