@@ -27,17 +27,11 @@ One script handles VASP-specific work; job submission is now delegated to the `d
 | `vasp_tools.py` | Prepare input files; collect / read results |
 | `skills/dpdisp/` | Submit prepared directories as jobs via DPDispatcher (see `dpdisp-submit` skill) |
 
-Script: `vasp_tools.py` (in the skill's `scripts/` directory).
-
-Use the `run_skill_script` tool to execute it:
-- `skill_name`: `"vasp"`
-- `script_name`: `"vasp_tools.py"`
-- `args`: the sub-command and flags as a single string
-
-The tool resolves the script from the skill directory and runs it with `cwd` set to the
-session working directory, so relative paths in arguments resolve correctly.
-
-`config.yaml` lives alongside the script in the skill's directory and is loaded automatically.
+> **Important:** Never call `python vasp_tools.py` directly. Always invoke it via the `run_skill_script` tool:
+> ```
+> run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="<subcommand and flags>")
+> ```
+> This ensures the script is found regardless of the current working directory.
 
 Every command prints JSON to stdout and exits 0 on success, 1 on error.
 
@@ -55,9 +49,6 @@ Every command prints JSON to stdout and exits 0 on success, 1 on error.
 
 Run exactly **one property step at a time**. Do not chain relaxation + SCF in a single step.
 
-If the requested VASP task is complex or unfamiliar, you are able to use Tavily to consult the official VASP Wiki How-to pages before deciding the sequence of calculations: `https://www.vasp.at/wiki/Category:Howto`.
-
-
 ---
 
 ## vasp_tools.py — Command reference
@@ -69,9 +60,6 @@ If the requested VASP task is complex or unfamiliar, you are able to use Tavily 
 | `--config PATH` | `config.yaml` next to the script | Path to config.yaml |
 | `--incar_tags JSON` | `{}` | Extra INCAR overrides, e.g. `'{"ENCUT": 600}'` |
 | `--potcar_map JSON` | `{}` | Element → POTCAR label, e.g. `'{"Bi": "Bi_d"}'` |
-
-If you are unsure about the meaning, allowed values, or recommended use of an INCAR tag, you are able to use Tavily to query the official VASP Wiki INCAR reference: `https://www.vasp.at/wiki/Category:INCAR_tag`. Do not guess unfamiliar INCAR parameters.
-
 
 All `prepare_*` commands return:
 ```json
@@ -85,11 +73,12 @@ All `prepare_*` commands return:
 Prepare structural relaxation (IBRION=2, ISIF=3, NSW=200).
 
 ```
-run_skill_script(
-    skill_name="vasp",
-    script_name="vasp_tools.py",
-    args="prepare_relaxation --structure <path.extxyz|path.vasp> [--frames 0 1 2] [--kpoints NX NY NZ] [--incar_tags '{\"ENCUT\": 600}'] [--potcar_map '{\"Bi\": \"Bi_d\"}']"
-)
+run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="prepare_relaxation \
+    --structure <path.extxyz|path.vasp> \
+    [--frames 0 1 2] \
+    [--kpoints NX NY NZ] \
+    [--incar_tags '{\"ENCUT\": 600}'] \
+    [--potcar_map '{\"Bi\": \"Bi_d\"}']")
 ```
 
 - `--structure`: structure file to read. Supported formats:
@@ -105,11 +94,12 @@ run_skill_script(
 Prepare a self-consistent field calculation (NSW=0, IBRION=-1).
 
 ```
-run_skill_script(
-    skill_name="vasp",
-    script_name="vasp_tools.py",
-    args="prepare_scf --structure <path.extxyz|path.vasp> [--frames 0 1 2] [--kpoints NX NY NZ] [--soc] [--incar_tags '{\"ENCUT\": 600}']"
-)
+run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="prepare_scf \
+    --structure <path.extxyz|path.vasp> \
+    [--frames 0 1 2] \
+    [--kpoints NX NY NZ] \
+    [--soc] \
+    [--incar_tags '{\"ENCUT\": 600}']")
 ```
 
 - `--structure`: structure file to read. Supported formats:
@@ -128,11 +118,12 @@ Prepare a non-self-consistent band-structure calculation along a k-path.
 Requires completed SCF directories that contain `CONTCAR` and `CHGCAR`.
 
 ```
-run_skill_script(
-    skill_name="vasp",
-    script_name="vasp_tools.py",
-    args="prepare_nscf_kpath --scf_dirs <scf_dir1> [<scf_dir2> ...] [--kpath GMKG] [--n_kpoints 16] [--soc] [--incar_tags '{\"NBANDS\": 48}']"
-)
+run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="prepare_nscf_kpath \
+    --scf_dirs <scf_dir1> [<scf_dir2> ...] \
+    [--kpath GMKG] \
+    [--n_kpoints 16] \
+    [--soc] \
+    [--incar_tags '{\"NBANDS\": 48}']")
 ```
 
 - `--kpath`: explicit path string (e.g. `GMKG`). Default: auto from pymatgen `HighSymmKpath`.
@@ -147,11 +138,11 @@ Prepare a non-self-consistent uniform-mesh calculation (for DOS).
 Requires completed SCF directories.
 
 ```
-run_skill_script(
-    skill_name="vasp",
-    script_name="vasp_tools.py",
-    args="prepare_nscf_uniform --scf_dirs <scf_dir1> [<scf_dir2> ...] [--kpoints NX NY NZ] [--soc] [--incar_tags '{\"NEDOS\": 2000}']"
-)
+run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="prepare_nscf_uniform \
+    --scf_dirs <scf_dir1> [<scf_dir2> ...] \
+    [--kpoints NX NY NZ] \
+    [--soc] \
+    [--incar_tags '{\"NEDOS\": 2000}']")
 ```
 
 - Default k-mesh: auto KPPRA density 100.
@@ -164,11 +155,8 @@ run_skill_script(
 Parse `OUTCAR` files and write all frames into a single extxyz (via dpdata).
 
 ```
-run_skill_script(
-    skill_name="vasp",
-    script_name="vasp_tools.py",
-    args="collect_results --dirs <calc_dir1> [<calc_dir2> ...]"
-)
+run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="collect_results \
+    --dirs <calc_dir1> [<calc_dir2> ...]")
 ```
 
 Returns:
@@ -183,11 +171,9 @@ Returns:
 Read `vasprun.xml` / `OUTCAR` and return key scalar results as JSON.
 
 ```
-run_skill_script(
-    skill_name="vasp",
-    script_name="vasp_tools.py",
-    args="read_results --calc_type <relaxation|scf|nscf> --calc_dir <calc_dir>"
-)
+run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="read_results \
+    --calc_type <relaxation|scf|nscf> \
+    --calc_dir  <calc_dir>")
 ```
 
 | calc_type | Returned fields |
@@ -203,77 +189,11 @@ run_skill_script(
 
 Submission is handled by the `dpdisp-submit` skill (DPDispatcher), which supports both Bohrium and standard Slurm/HPC clusters. See the `dpdisp-submit` skill documentation for full details and schema.
 
-### Required environment variables
+For the full VASP-specific Bohrium `submission.json` template, environment variables, and submission flow, load the reference:
 
-Set in your environment or via `.env` as needed for your backend (e.g., Bohrium credentials, Slurm SSH info, etc). For Bohrium, typical variables include:
-
-| Variable | Description |
-|---|---|
-| `BOHRIUM_EMAIL` | Bohrium account e-mail |
-| `BOHRIUM_PASSWORD` | Bohrium account password |
-| `BOHRIUM_PROJECT_ID` | Bohrium project ID (integer) |
-| `BOHRIUM_VASP_MACHINE` | Machine/scass type, e.g. `c32_m128_cpu` |
-| `BOHRIUM_VASP_IMAGE` | Container image URI for VASP |
-
-For Slurm or other clusters, set the appropriate SSH and resource variables (see `dpdisp-submit` docs).
-
-### Example submission.json for VASP (Bohrium)
-
-Bohrium uses `remote_profile` with an `input_data` sub-object. The `scass_type`, `image_name`, `platform`, and `job_type` fields go inside `input_data`.
-
-```json
-{
-    "work_base": ".",
-    "machine": {
-        "batch_type": "Bohrium",
-        "context_type": "BohriumContext",
-        "local_root": ".",
-        "remote_profile": {
-            "email": "${BOHRIUM_EMAIL}",
-            "password": "${BOHRIUM_PASSWORD}",
-            "program_id": ${BOHRIUM_PROJECT_ID},
-            "input_data": {
-                "job_type": "container",
-                "log_file": "log",
-                "scass_type": "${BOHRIUM_VASP_MACHINE}",
-                "platform": "ali",
-                "image_name": "${BOHRIUM_VASP_IMAGE}"
-            }
-        }
-    },
-    "resources": {
-        "group_size": 4
-    },
-    "task_list": [
-        {
-            "command": "source /opt/intel/oneapi/setvars.sh && mpirun -n 32 vasp_std",
-            "task_work_path": "<calc_dir>",
-            "forward_files": ["POSCAR", "INCAR", "POTCAR", "KPOINTS"],
-            "backward_files": ["OSZICAR", "CONTCAR", "OUTCAR", "vasprun.xml", "log", "err"]
-        }
-    ]
-}
 ```
-
-For Slurm, set `batch_type` to `Slurm`, `context_type` to `SSHContext`, and fill in the SSH and resource fields as needed.
-
-### Submission flow
-
-1. Generate `submission.template.json` as above, using `${VARNAME}` for any environment variables.
-2. Substitute variables:
-     ```bash
-     envsubst '${BOHRIUM_EMAIL} ${BOHRIUM_PASSWORD} ${BOHRIUM_PROJECT_ID} ${BOHRIUM_VASP_MACHINE} ${BOHRIUM_VASP_IMAGE}' < submission.template.json > submission.json
-     ```
-3. Validate and submit:
-     ```bash
-     uv run -m json.tool submission.json >/dev/null
-     uvx --with dpdispatcher dargs check -f dpdispatcher.entrypoints.submit.submission_args submission.json
-     uvx --from dpdispatcher --with oss2 dpdisp submit submission.json
-     ```
-
-> **Note:** Always use `--with oss2` for Bohrium jobs. `oss2` (Aliyun OSS SDK) is required by `BohriumContext` but is not bundled with dpdispatcher in uvx isolated environments. Omitting it causes `NameError: name 'oss2' is not defined`.
-
-Append or adjust fields for SCF/NSCF as needed (e.g., add `CHGCAR`, `WAVECAR` to `forward_files`/`backward_files`).
+load_skill_resource(skill_name="vasp", path="references/bohrium-submission.md")
+```
 
 ---
 
@@ -284,26 +204,32 @@ Append or adjust fields for SCF/NSCF as needed (e.g., add `CHGCAR`, `WAVECAR` to
 # 1. Prepare relaxation
 run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
     args="prepare_relaxation --structure Al.extxyz")
+# → returns {"status": "success", "calc_dir_list": [...]}
 
 # 2. Generate submission.template.json for relaxation (see above for schema)
 #    (Repeat for each calc_dir as a task in task_list)
 
 # 3. Substitute environment variables
-# 4. Validate and submit (via run_bash)
+envsubst '${BOHRIUM_USERNAME} ${BOHRIUM_PASSWORD} ${BOHRIUM_PROJECT_ID} ${BOHRIUM_VASP_MACHINE} ${BOHRIUM_VASP_IMAGE}' < submission.template.json > submission.json
+
+# 4. Validate and submit
+uv run -m json.tool submission.json >/dev/null
+uvx --with dpdispatcher dargs check -f dpdispatcher.entrypoints.submit.submission_args submission.json
+uvx --from dpdispatcher --with oss2 dpdisp submit submission.json
 
 # 5. Read relaxation results
 run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
     args="read_results --calc_type relaxation --calc_dir <relax_dir>")
 
-# 6. Prepare SCF from relaxed structure
+# 6. Prepare SCF from relaxed structure (CONTCAR → extxyz conversion needed, or pass CONTCAR directly)
 run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
     args="prepare_scf --structure Al_relaxed.extxyz")
 
-# 7. Repeat submission steps for SCF
+# 7. Repeat submission steps for SCF (adjust forward/backward files as needed)
 
 # 8. Prepare NSCF k-path from SCF output
 run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
-    args="prepare_nscf_kpath --scf_dirs <scf_dir>")
+    args="prepare_nscf_kpath --scf_dirs <scf_dir1> [<scf_dir2> ...]")
 
 # 9. Repeat submission steps for NSCF
 
@@ -316,15 +242,21 @@ run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
 
 ## Configuration file (config.yaml)
 
-`config.yaml` lives in the skill's `scripts/` directory alongside `vasp_tools.py`. It controls:
+`config.yaml` lives in the same directory as `vasp_tools.py`. It controls:
 
 - `work_dir` — where all calculation subdirectories are created (default `/tmp/vasp_server`).
 - `VASP_default_INCAR` — one sub-key per preset (`relaxation`, `scf_nsoc`, `scf_soc`, `nscf_nsoc`, `nscf_soc`).
 
 **When asked about default INCAR settings, read `config.yaml` directly** — do not guess from memory, as the user may have edited it.
 
-To override individual tags for a single run without editing the file, use `--incar_tags`:
+Use `run_bash` to inspect it:
+```bash
+cat "$(python -c "import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec('vasp_tools').origin).parent if importlib.util.find_spec('vasp_tools') else '.')")/config.yaml"
 ```
+Or simply ask the agent to read it via `read_workspace_file("skills/vasp/config.yaml")`.
+
+To override individual tags for a single run without editing the file, use `--incar_tags`:
+```bash
 --incar_tags '{"ENCUT": 600, "EDIFF": 1e-6}'
 ```
 
