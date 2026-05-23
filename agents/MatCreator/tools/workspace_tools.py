@@ -236,11 +236,10 @@ def run_bash(script: str, tool_context: ToolContext) -> str:
         result = subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
-            text=True,
             timeout=_EXEC_TIMEOUT,
             cwd=cwd,
         )
-        output = result.stdout + result.stderr
+        output = result.stdout.decode("utf-8", errors="replace") + result.stderr.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired as exc:
         partial_out = (exc.output or b"").decode(errors="replace") if isinstance(exc.output, bytes) else (exc.output or "")
         partial_err = (exc.stderr or b"").decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
