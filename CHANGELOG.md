@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-05-26)
+
+### Bug Fixes
+
+- Add script for graph visualization
+  ([`a1ad34f`](https://github.com/nlz25/PFD_Agent/commit/a1ad34f97f82c54817e883f358957c83d295f256))
+
+### Features
+
+- Add skill graph
+  ([`db44113`](https://github.com/nlz25/PFD_Agent/commit/db441130f39829e313c8173bcaa29cec22f3001b))
+
+- Graph planning
+  ([`48fa5eb`](https://github.com/nlz25/PFD_Agent/commit/48fa5ebda5cb2e647f34bc160e0c8ad79ba76b23))
+
+
 ## v1.6.1 (2026-05-23)
 
 ### Bug Fixes
