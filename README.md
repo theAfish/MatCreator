@@ -208,3 +208,38 @@ Skills are Markdown files with a YAML frontmatter block (declaring `name`, `desc
 To customize a skill manually, copy its skill directory into your workspace `skills/` directory and edit the contained `SKILL.md`. To add a new skill, create a new `skills/<name>/SKILL.md` file following the same frontmatter format.
 
 The agent can also create and update skills on its own. During a session, the thinking agent can call built-in tools to scaffold a new skill file, write updated content to an existing one, or list what skills are currently available — letting the system accumulate knowledge automatically over time.
+
+## Skill Graph
+
+MatCreator organizes its knowledge as a graph of nodes and edges, stored in two separate SQLite databases:
+
+- **`skill_graph.db`** — developer-maintained, immutable nodes seeded from the skills directory.
+- **`memory_graph.db`** — agent-learned nodes written during sessions; subject to synthesis and pruning.
+
+In skill graph, each node belongs to one of three categories:
+
+| Type | Description |
+|------|-------------|
+| **Concept** | Foundational domain knowledge and reference material (e.g. DFT theory, force-field conventions). Used as planning guidance rather than executable steps. |
+| **Skill** | A self-contained, executable capability backed by a `SKILL.md` file (e.g. `vasp_relaxation`, `mattergen_generation`). The agent calls these during execution. |
+| **Workflow** | A higher-level template that orchestrates multiple skills into a reusable sequence (e.g. a full MLFF training pipeline). |
+
+Edges capture relationships between nodes (`depends_on`, `belongs_to`, `relates_to`). Semantic embeddings on every node enable vector search, so the agent can retrieve relevant skills and concepts by meaning rather than exact name.
+
+## Graph-Based Planning
+
+When given a goal, the thinking agent produces an **execution graph** — a directed acyclic graph (DAG) where each node is a discrete action and each edge encodes a dependency.
+
+```
+step_download_data ──► step_relax ──► step_postprocess
+                   └──► step_static ─►
+```
+
+Key properties:
+
+- **Nodes** carry a `node_id`, human-readable `label`, natural-language `action` description, and a list of `suggested_skills`.
+- **Edges** are `[predecessor_id, successor_id]` pairs. A node cannot start until all its predecessors have succeeded.
+- **Parallel execution**: nodes with no unresolved dependencies are dispatched concurrently in a single turn.
+- **Failure propagation**: if a node fails, all transitive dependents are marked `blocked` automatically.
+
+The agent validates the graph for cycles before presenting it to the user, then waits for explicit confirmation before handing it off to the execution agent.
