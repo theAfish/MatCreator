@@ -157,7 +157,7 @@ def seed_skills_to_graph() -> dict:
 
 
 def refresh_skills() -> dict:
-    """Reload all skills from the workspace and update the active toolset.
+    """Reload all skills from the workspace and re-seed the knowledge graph.
 
     Call this after creating or modifying a skill to make it available
     in the current session without restarting.
@@ -165,10 +165,10 @@ def refresh_skills() -> dict:
     new_skills = load_skills()
     ALL_SKILLS.clear()
     ALL_SKILLS.extend(new_skills)
-    ALL_SKILLS_TOOLSET._skills = {s.name: s for s in new_skills}
+    seed_result = seed_skills_to_graph()
     return {
         "status": "ok",
         "skills": [s.name for s in new_skills],
         "count": len(new_skills),
-        "message": f"Refreshed {len(new_skills)} skills.",
+        "message": f"Refreshed {len(new_skills)} skills; seeded {seed_result['seeded']} nodes into knowledge graph.",
     }

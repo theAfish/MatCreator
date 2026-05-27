@@ -279,7 +279,7 @@ thinking_agent = LlmAgent(
     instruction=_MATCREATOR_INSTRUCTION,
     tools=[
         FunctionTool(validate_graph),
-        FunctionTool(validate_plan),   # kept for backward compatibility
+        #FunctionTool(validate_plan),   # kept for backward compatibility
         FunctionTool(validate_intent),
         FunctionTool(validate_summarize),
         FunctionTool(write_session_summary),
@@ -299,6 +299,7 @@ thinking_agent = LlmAgent(
         FunctionTool(run_bash),
         FunctionTool(read_execution_trajectory),
         FunctionTool(read_agent_graph),
+        FunctionTool(load_skill),
         show_artifact,
         show_plot,
         show_structure,
