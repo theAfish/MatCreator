@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.7.2 (2026-05-27)
+
+### Bug Fixes
+
+- Issues with refresh_skill tool
+  ([`fd58a24`](https://github.com/nlz25/PFD_Agent/commit/fd58a243f00b266391d0f3ccf341cda8b08803db))
+
+
 ## v1.7.1 (2026-05-27)
 
 ### Bug Fixes
