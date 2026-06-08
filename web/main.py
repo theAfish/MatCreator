@@ -20,16 +20,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shutil
 import signal
 import socket
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
 from dotenv import dotenv_values
 from dotenv import set_key as dotenv_set_key
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -53,8 +56,8 @@ from agents.MatCreator.agents.cancellation import (  # noqa: E402
     request_step_cancellation,
 )
 from agents.MatCreator.agents.graph_logger import AgentGraphLogger  # noqa: E402
-from agents.MatCreator.skill import ALL_SKILLS, PLANNING_SKILL_NAMES, refresh_skills  # noqa: E402
-from agents.MatCreator.config import load_config, save_config  # noqa: E402
+from agents.MatCreator.skill import ALL_SKILLS, PLANNING_SKILL_NAMES, refresh_skills, get_default_skill_names  # noqa: E402
+from agents.MatCreator.config import load_config, save_config, get_disabled_skills  # noqa: E402
 
 app = FastAPI(title="MatCreator Graph API", version="1.0.0")
 APP_NAME = "MatCreator"
@@ -200,6 +203,9 @@ def _available_upload_path(upload_dir: Path, filename: str) -> Path:
     raise HTTPException(status_code=409, detail="Too many files with the same name")
 
 
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
 @app.on_event("startup")
 async def _on_startup() -> None:
     users_db.init_db()
@@ -577,16 +583,113 @@ async def list_skills() -> JSONResponse:
             if parent_skill_md.is_file():
                 parent_map[path.name] = path.parent.name
 
+    default_skill_names = get_default_skill_names()
+    disabled_skills = set(get_disabled_skills())
     skills = [
         {
             "name": s.name,
             "description": s.description or "",
             "planning_enabled": s.name in PLANNING_SKILL_NAMES,
+            "enabled": s.name not in disabled_skills,
             "parent": parent_map.get(s.name),
+            "is_custom": s.name not in default_skill_names,
         }
         for s in sorted(ALL_SKILLS, key=lambda s: s.name)
     ]
     return JSONResponse(skills)
+
+
+@app.get("/api/skills/defaults")
+async def list_default_skill_names() -> JSONResponse:
+    """Return the names of all bundled default skills."""
+    return JSONResponse({"names": sorted(get_default_skill_names())})
+
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+@app.post("/api/skills/custom")
+async def create_custom_skill(
+    name: str = Form(...),
+    skill_md: UploadFile = File(...),
+    references: List[UploadFile] = File(default=[]),
+    scripts: List[UploadFile] = File(default=[]),
+) -> JSONResponse:
+    """Upload a custom skill to the workspace skills directory."""
+    name = name.strip()
+    if not _SKILL_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=422,
+            detail="Skill name must be lowercase alphanumeric with hyphens/underscores, starting with a letter or digit.",
+        )
+    if name in get_default_skill_names():
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{name}' is a built-in default skill. Custom skills cannot use the same name.",
+        )
+
+    skill_dir = workspace_skills_dir() / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        skill_md_content = await skill_md.read()
+        (skill_dir / "SKILL.md").write_bytes(skill_md_content)
+
+        ref_names = []
+        non_empty_refs = [r for r in references if r.filename]
+        if non_empty_refs:
+            ref_dir = skill_dir / "references"
+            ref_dir.mkdir(exist_ok=True)
+            for ref_file in non_empty_refs:
+                safe_name = _safe_upload_filename(ref_file.filename or "ref")
+                (ref_dir / safe_name).write_bytes(await ref_file.read())
+                ref_names.append(safe_name)
+
+        script_names = []
+        non_empty_scripts = [s for s in scripts if s.filename]
+        if non_empty_scripts:
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(exist_ok=True)
+            for script_file in non_empty_scripts:
+                safe_name = _safe_upload_filename(script_file.filename or "script")
+                (scripts_dir / safe_name).write_bytes(await script_file.read())
+                script_names.append(safe_name)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write skill files: {exc}")
+    finally:
+        await skill_md.close()
+        for r in references:
+            await r.close()
+        for s in scripts:
+            await s.close()
+
+    refresh_skills()
+    return JSONResponse({"status": "ok", "name": name, "references": ref_names, "scripts": script_names})
+
+
+@app.delete("/api/skills/custom/{skill_name}")
+async def delete_custom_skill(skill_name: str) -> JSONResponse:
+    """Delete a custom workspace skill. Default skills cannot be deleted."""
+    if not _SKILL_NAME_RE.match(skill_name):
+        raise HTTPException(status_code=400, detail=f"Invalid skill name: '{skill_name}'.")
+    if skill_name in get_default_skill_names():
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{skill_name}' is a built-in default skill and cannot be deleted.",
+        )
+    root = workspace_skills_dir()
+    skill_dir = root / skill_name
+    if skill_dir.resolve() == root.resolve() or not skill_dir.resolve().is_relative_to(root.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid skill path.")
+    if not skill_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found in workspace.")
+    try:
+        shutil.rmtree(skill_dir)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete skill: {exc}")
+
+    refresh_skills()
+    return JSONResponse({"status": "ok", "deleted": skill_name})
 
 
 @app.get("/api/settings")
@@ -598,6 +701,7 @@ async def get_settings() -> JSONResponse:
 class SettingsBody(BaseModel):
     planning: dict | None = None
     user: dict | None = None
+    skills: dict | None = None
 
 
 @app.put("/api/settings")
@@ -608,6 +712,8 @@ async def update_settings(body: SettingsBody) -> JSONResponse:
         config.setdefault("planning", {}).update(body.planning)
     if body.user is not None:
         config.setdefault("user", {}).update(body.user)
+    if body.skills is not None:
+        config.setdefault("skills", {}).update(body.skills)
     save_config(config)
     refresh_skills()
     return JSONResponse({

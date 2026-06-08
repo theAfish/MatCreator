@@ -4,14 +4,14 @@ The workspace root is resolved in this order:
 1. ``MATCLAW_WORKSPACE`` environment variable (absolute or relative to CWD)
 2. ``~/.workspace/`` in the user's home directory
 
-On first use, call :func:`init_workspace` to create the directory tree and
-copy the built-in default knowledge into it so the user has a starting point.
+On first use, call :func:`init_workspace` to create the directory tree.
+Default skills are loaded directly from the module; only custom (user-created)
+skills belong in ``$WORKSPACE/skills/``.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 from .constants import _AGENT_PATH
 
@@ -61,11 +61,14 @@ def init_session_workdir(session_id: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def init_workspace(force: bool = False) -> str:
-    """Create the workspace directory tree and seed it with built-in defaults.
+    """Create the workspace directory tree and seed built-in guides and memory.
+
+    Default skills are NOT copied here — they are loaded directly from the
+    module at runtime.  Only user-created custom skills belong in the workspace.
 
     If the workspace already exists this is a no-op unless *force* is True,
-    in which case built-in files that are missing from the workspace are
-    re-copied (existing workspace files are never overwritten).
+    in which case built-in guide files that are missing are re-copied
+    (existing workspace files are never overwritten).
 
     Returns a human-readable status message.
     """
@@ -78,31 +81,12 @@ def init_workspace(force: bool = False) -> str:
 
     copied: list[str] = []
 
-    # Copy built-in flat skills → workspace flat skills (do not overwrite)
-    builtin_skills = _AGENT_PATH / "skills"
-    #for src in sorted(builtin_skills.glob("*.md")):
-    #    dst = skills_dir / src.name
-    #    if not dst.exists() or force:
-    #        shutil.copy2(src, dst)
-    #        copied.append(f"skills/{src.name}")
-    # Copy built-in subdir skills → workspace subdir skills (always override)
-    for skill_subdir in sorted(builtin_skills.iterdir()):
-        if not skill_subdir.is_dir():
-            continue
-        for src in sorted(skill_subdir.rglob("*")):
-            if not src.is_file():
-                continue
-            rel = src.relative_to(builtin_skills)
-            dst = skills_dir / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            copied.append(f"skills/{rel}")
-
     # Copy built-in guides → workspace guides (do not overwrite)
     builtin_guides = _AGENT_PATH / "guides"
     for src in sorted(builtin_guides.glob("*.md")):
         dst = guides_dir / src.name
         if not dst.exists() or force:
+            import shutil
             shutil.copy2(src, dst)
             copied.append(f"guides/{src.name}")
 

@@ -2556,15 +2556,44 @@ function _renderSkillNode(node, extraSkills, depth) {
   cb.disabled = isBuiltIn;
   if (isBuiltIn) cb.title = "Enabled by built-in category";
 
+  const enabledCb = document.createElement("input");
+  enabledCb.type = "checkbox";
+  enabledCb.className = "skill-enabled-checkbox";
+  enabledCb.dataset.name = node.name;
+  enabledCb.checked = node.enabled !== false;
+  enabledCb.title = "Enable skill for graph search";
+
   const nameEl = document.createElement("span");
   nameEl.className = "st-name";
   nameEl.textContent = node.name;
+
+  if (node.is_custom) {
+    const badge = document.createElement("span");
+    badge.className = "skill-badge-custom";
+    badge.textContent = "Custom";
+    nameEl.appendChild(badge);
+  }
 
   const descEl = document.createElement("span");
   descEl.className = "st-desc";
   descEl.textContent = node.description;
 
-  row.append(toggle, cb, nameEl, descEl);
+  row.append(toggle, enabledCb, cb, nameEl, descEl);
+
+  if (node.is_custom) {
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "skill-delete-btn";
+    delBtn.title = "Delete custom skill";
+    delBtn.textContent = "✕";
+    delBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete custom skill "${node.name}"?`)) return;
+      await deleteCustomSkill(node.name);
+    });
+    row.appendChild(delBtn);
+  }
+
   item.appendChild(row);
 
   if (hasChildren) {
@@ -2602,6 +2631,77 @@ function _renderSkillNode(node, extraSkills, depth) {
   return item;
 }
 
+// ---- custom skill upload / delete ------------------------------------------
+
+async function uploadCustomSkill() {
+  const nameInput = document.getElementById("custom-skill-name");
+  const mdInput = document.getElementById("custom-skill-md");
+  const refsInput = document.getElementById("custom-skill-refs");
+  const scriptsInput = document.getElementById("custom-skill-scripts");
+  const errorEl = document.getElementById("custom-skill-error");
+  const uploadBtn = document.getElementById("custom-skill-upload-btn");
+
+  if (!nameInput || !mdInput) return;
+  errorEl.textContent = "";
+
+  const name = nameInput.value.trim();
+  if (!name) { errorEl.textContent = "Skill name is required."; return; }
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) {
+    errorEl.textContent = "Name must be lowercase alphanumeric with hyphens/underscores.";
+    return;
+  }
+  if (!mdInput.files.length) { errorEl.textContent = "SKILL.md file is required."; return; }
+
+  const formData = new FormData();
+  formData.append("name", name);
+  formData.append("skill_md", mdInput.files[0]);
+  for (const ref of Array.from(refsInput?.files || [])) {
+    formData.append("references", ref);
+  }
+  for (const script of Array.from(scriptsInput?.files || [])) {
+    formData.append("scripts", script);
+  }
+
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = "Uploading…";
+  try {
+    const resp = await fetch("/api/skills/custom", { method: "POST", body: formData });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorEl.textContent = body.detail || `Upload failed (${resp.status})`;
+      return;
+    }
+    nameInput.value = "";
+    mdInput.value = "";
+    if (refsInput) refsInput.value = "";
+    if (scriptsInput) scriptsInput.value = "";
+    settingsStatus.textContent = `Custom skill "${name}" uploaded ✓`;
+    setTimeout(() => { settingsStatus.textContent = ""; }, 3000);
+    await loadSettingsData();
+  } catch (err) {
+    errorEl.textContent = `Upload failed: ${err.message}`;
+  } finally {
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = "Upload Skill";
+  }
+}
+
+async function deleteCustomSkill(skillName) {
+  try {
+    const resp = await fetch(`/api/skills/custom/${encodeURIComponent(skillName)}`, { method: "DELETE" });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      settingsStatus.textContent = body.detail || `Delete failed (${resp.status})`;
+      return;
+    }
+    settingsStatus.textContent = `Custom skill "${skillName}" deleted ✓`;
+    setTimeout(() => { settingsStatus.textContent = ""; }, 3000);
+    await loadSettingsData();
+  } catch (err) {
+    settingsStatus.textContent = `Delete failed: ${err.message}`;
+  }
+}
+
 // ---- load / save -----------------------------------------------------------
 
 async function loadSettingsData() {
@@ -2620,9 +2720,39 @@ async function loadSettingsData() {
 
     const roots = _buildSkillTree(skills);
     skillsChecklist.innerHTML = "";
+
+    const header = document.createElement("div");
+    header.className = "st-header";
+    header.innerHTML = '<span></span><span class="st-col-label" title="Skill is visible to graph search">Enabled</span><span class="st-col-label" title="Full SKILL.md available to planning agent">Planning</span><span></span>';
+    skillsChecklist.appendChild(header);
+
     for (const node of roots) {
       skillsChecklist.appendChild(_renderSkillNode(node, extraSkills, 0));
     }
+
+    // Custom skill upload section
+    const uploadSection = document.createElement("div");
+    uploadSection.className = "skill-upload-section";
+    uploadSection.innerHTML = `
+      <details class="skill-upload-details">
+        <summary class="skill-upload-summary">+ Add Custom Skill</summary>
+        <div class="skill-upload-form">
+          <label class="settings-label">Skill Name <span style="font-weight:400;text-transform:none;letter-spacing:0">(lowercase, hyphens/underscores only)</span></label>
+          <input id="custom-skill-name" class="text-input settings-env-input" placeholder="e.g. my-custom-skill" autocomplete="off" />
+          <label class="settings-label" style="margin-top:8px">SKILL.md file <span style="color:#f87171">*</span></label>
+          <input id="custom-skill-md" type="file" accept=".md,text/markdown,text/plain" class="skill-file-input" />
+          <label class="settings-label" style="margin-top:8px">Reference files <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional, multiple)</span></label>
+          <input id="custom-skill-refs" type="file" multiple class="skill-file-input" />
+          <label class="settings-label" style="margin-top:8px">Script files <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional, .py/.sh/.js)</span></label>
+          <input id="custom-skill-scripts" type="file" multiple accept=".py,.sh,.bash,.js" class="skill-file-input" />
+          <p id="custom-skill-error" class="skill-upload-error"></p>
+          <button id="custom-skill-upload-btn" type="button" class="ghost" style="margin-top:8px;width:100%;justify-content:center">Upload Skill</button>
+        </div>
+      </details>
+    `;
+    skillsChecklist.appendChild(uploadSection);
+
+    document.getElementById("custom-skill-upload-btn")?.addEventListener("click", uploadCustomSkill);
 
     // Populate env config inputs
     for (const [key, getEl] of Object.entries(envInputs)) {
@@ -2642,6 +2772,12 @@ async function saveSettings() {
     skillsChecklist.querySelectorAll(".skill-checkbox:not(:disabled)")
   )
     .filter((cb) => cb.checked && !cb.indeterminate)
+    .map((cb) => cb.dataset.name);
+
+  const disabledSkills = Array.from(
+    skillsChecklist.querySelectorAll(".skill-enabled-checkbox")
+  )
+    .filter((cb) => !cb.checked)
     .map((cb) => cb.dataset.name);
 
   // Collect env config values (skip empty sensitive fields with "***")
@@ -2665,6 +2801,7 @@ async function saveSettings() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           planning: { extra_skills: extraSkills },
+          skills: { disabled: disabledSkills },
           user: username ? { name: username } : undefined,
         }),
       }),

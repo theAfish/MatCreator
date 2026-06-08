@@ -162,6 +162,13 @@ def create_skill(
     skill_dir = workspace_skills_dir() / name
     skill_file = skill_dir / "SKILL.md"
 
+    from ..skill import get_default_skill_names
+    if name in get_default_skill_names():
+        return (
+            f"Cannot create skill '{name}': a default skill with that name already exists. "
+            "Default skills cannot be overridden by workspace skills."
+        )
+
     if skill_file.exists():
         return (
             f"Skill '{name}' already exists at {skill_file}. "
@@ -304,13 +311,15 @@ def run_skill_script(
         Combined stdout and stderr output, truncated to 4 000 characters.
     """
     from ..workspace import workspace_skills_dir
+    from ..skill import _MODULE_SKILLS_ROOT
 
-    skills_root = workspace_skills_dir()
-    script_path = _resolve_skill_script_path(skills_root, skill_name, script_name)
+    script_path = _resolve_skill_script_path(workspace_skills_dir(), skill_name, script_name)
+    if script_path is None:
+        script_path = _resolve_skill_script_path(_MODULE_SKILLS_ROOT, skill_name, script_name)
     if script_path is None:
         return (
             f"Script not found for skill '{skill_name}': scripts/{script_name}\n"
-            f"Searched under: {skills_root}\n"
+            f"Searched under: {workspace_skills_dir()} and {_MODULE_SKILLS_ROOT}\n"
             f"Ensure the skill has a scripts/{script_name} file."
         )
 
@@ -369,4 +378,7 @@ def init_workspace_tool() -> str:
         Status message describing what was created.
     """
     from ..workspace import init_workspace
-    return init_workspace()
+    from ..skill import refresh_skills
+    msg = init_workspace()
+    refresh_skills()
+    return msg

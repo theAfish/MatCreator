@@ -45,14 +45,30 @@ def _discover_skill_dirs(skills_root: Path) -> list[Path]:
 _MODULE_SKILLS_ROOT = Path(__file__).parent / "skills"
 
 
+def get_default_skill_names() -> set[str]:
+    """Return the set of skill names bundled with the module (not workspace overrides)."""
+    return {p.name for p in _discover_skill_dirs(_MODULE_SKILLS_ROOT)}
+
+
 def load_skills() -> list:
-    """Load skills from the module defaults, with workspace overrides taking precedence."""
-    skill_map: dict[str, Path] = {}
+    """Load default module skills plus workspace custom skills.
+
+    Custom skills whose name collides with a default skill are rejected with a warning.
+    """
+    default_names: set[str] = set()
+    skills = []
     for path in _discover_skill_dirs(_MODULE_SKILLS_ROOT):
-        skill_map[path.name] = path
+        default_names.add(path.name)
+        skills.append(load_skill_from_dir(path))
     for path in _discover_skill_dirs(workspace_skills_dir()):
-        skill_map[path.name] = path  # workspace wins over module default
-    return [load_skill_from_dir(p) for p in skill_map.values()]
+        if path.name in default_names:
+            logger.warning(
+                "Custom skill '%s' in workspace conflicts with a default skill and will be ignored.",
+                path.name,
+            )
+            continue
+        skills.append(load_skill_from_dir(path))
+    return skills
 
 
 ALL_SKILLS = load_skills()
@@ -82,7 +98,7 @@ class MatCreatorSkillToolset(skill_toolset.SkillToolset):
         kept = [t for t in self._tools
                 if t.__class__.__name__ in ('LoadSkillTool', 'LoadSkillResourceTool')]
         self._tools = [
-            FunctionTool(list_workspace_skills),
+            #FunctionTool(list_workspace_skills),
             *kept,
             FunctionTool(run_skill_script),
         ]

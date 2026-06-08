@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 import difflib
 from datetime import datetime, timezone
@@ -13,6 +14,9 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 from .schema import Base, KgNode, KgEdge, CATEGORIES, EDGE_TYPES
+
+_EMBEDDINGS_CACHE_TTL_SECONDS = 30
+_NX_CACHE_TTL_SECONDS = 30
 
 
 def _db_url(db_path: Path) -> str:
@@ -35,6 +39,8 @@ class KnowledgeGraph:
         Base.metadata.create_all(self._engine)
         self._Session = sessionmaker(bind=self._engine)
         self._migrate()
+        self._embeddings_cache: tuple[list[tuple[str, list[float]]], float] | None = None
+        self._nx_cache: tuple[nx.DiGraph, float] | None = None
 
     def _migrate(self) -> None:
         """Add columns and migrate data introduced after initial schema creation."""
@@ -96,6 +102,7 @@ class KnowledgeGraph:
         """
         if category not in CATEGORIES:
             raise ValueError(f"category must be one of {CATEGORIES}, got {category!r}")
+        self._invalidate_caches()
         with self._Session() as sess:
             # Exact match first
             existing = sess.execute(
@@ -196,14 +203,26 @@ class KnowledgeGraph:
                 n.embedding = embedding
                 n.updated_at = datetime.now(timezone.utc)
                 sess.commit()
+        self._invalidate_caches()
 
     def get_all_embeddings(self) -> list[tuple[str, list[float]]]:
-        """Return (node_id, embedding) for all nodes that have an embedding."""
+        """Return (node_id, embedding) for all nodes that have an embedding (TTL cached)."""
+        now = time.monotonic()
+        if self._embeddings_cache is not None:
+            cached_data, cached_at = self._embeddings_cache
+            if now - cached_at < _EMBEDDINGS_CACHE_TTL_SECONDS:
+                return cached_data
         with self._Session() as sess:
             rows = sess.execute(
                 select(KgNode.id, KgNode.embedding).where(KgNode.embedding.isnot(None))
             ).all()
-            return [(row.id, row.embedding) for row in rows]
+            result = [(row.id, row.embedding) for row in rows]
+        self._embeddings_cache = (result, now)
+        return result
+
+    def _invalidate_caches(self) -> None:
+        self._embeddings_cache = None
+        self._nx_cache = None
 
     def get_nodes_without_embeddings(self) -> list[KgNode]:
         """Return nodes that still need an embedding computed."""
@@ -231,6 +250,7 @@ class KnowledgeGraph:
 
         Raises ValueError if the edge would go from a skill node to a memory node.
         """
+        self._invalidate_caches()
         with self._Session() as sess:
             src = sess.get(KgNode, source_id)
             tgt = sess.get(KgNode, target_id)
@@ -288,7 +308,12 @@ class KnowledgeGraph:
     # ------------------------------------------------------------------
 
     def load_networkx(self) -> nx.DiGraph:
-        """Load the full graph into a NetworkX DiGraph for traversal."""
+        """Load the full graph into a NetworkX DiGraph for traversal (TTL cached)."""
+        now = time.monotonic()
+        if self._nx_cache is not None:
+            cached_graph, cached_at = self._nx_cache
+            if now - cached_at < _NX_CACHE_TTL_SECONDS:
+                return cached_graph
         G = nx.DiGraph()
         with self._Session() as sess:
             for n in sess.execute(select(KgNode)).scalars():
@@ -305,6 +330,7 @@ class KnowledgeGraph:
             for e in sess.execute(select(KgEdge)).scalars():
                 G.add_edge(e.source_id, e.target_id,
                            edge_type=e.edge_type, weight=e.weight)
+        self._nx_cache = (G, now)
         return G
 
     # ------------------------------------------------------------------

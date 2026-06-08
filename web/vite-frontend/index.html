@@ -289,7 +289,7 @@
         </div>
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="profile">Profile</button>
-          <button class="settings-tab" data-tab="skills">Planning Skills</button>
+          <button class="settings-tab" data-tab="skills">Skills</button>
           <button class="settings-tab" data-tab="llm">LLM Settings</button>
           <button class="settings-tab" data-tab="bohr">Bohr Credentials</button>
         </div>
@@ -302,9 +302,10 @@
             <button id="settings-logout-btn" class="ghost" style="margin-top:16px;width:100%;justify-content:center;color:#f87171;border:1px solid #f8717144">Log out</button>
           </div>
           <div class="settings-pane hidden" id="tab-skills">
-            <p class="settings-hint">Skills checked below will have their full SKILL.md instructions
-              available to the planning agent, in addition to the built-in
-              <code>concepts</code> and <code>guides</code> categories.</p>
+            <p class="settings-hint">
+              <strong>Enabled</strong> — skill is visible to the agent's graph search.<br>
+              <strong>Planning</strong> — full SKILL.md is available to the planning agent (in addition to the built-in <code>concepts</code> and <code>guides</code> categories).
+            </p>
             <div id="skills-checklist" class="skills-checklist"></div>
           </div>
           <div class="settings-pane hidden" id="tab-llm">

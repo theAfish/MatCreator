@@ -5,7 +5,9 @@ metadata:
   tools:
     - run_bash
     - run_skill_script
+    - load_skill_resource
   dependent_skills:
+    - bohrium
     - dpdisp
   tags:
     - vasp
@@ -24,47 +26,24 @@ One script handles VASP-specific work; job submission is now delegated to the `d
 
 | Script | Role |
 |---|---|
-| `vasp_tools.py` | Prepare input files; collect / read results |
-| `skills/dpdisp/` | Submit prepared directories as jobs via DPDispatcher (see `dpdisp-submit` skill) |
+| `vasp_tools.py` | Prepare input files; collect / read results 
 
-> **Important:** Never call `python vasp_tools.py` directly. Always invoke it via the `run_skill_script` tool:
-> ```
-> run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="<subcommand and flags>")
-> ```
-> This ensures the script is found regardless of the current working directory.
+Use the `run_skill_script` tool to execute it:
+- `skill_name`: `"vasp"`
+- `script_name`: `"vasp_prepare.py"`
+- `args`: the sub-command and flags as a single string
 
 Every command prints JSON to stdout and exits 0 on success, 1 on error.
 
-> **Note:** Submission is now handled by the `dpdisp-submit` skill, which supports both Bohrium and standard Slurm clusters. The previous `bohr` skill and `bohrium_submit.py` are deprecated for new workflows.
-
 ---
-
-
 ## Mandatory workflow sequence
 
 1. **Obtain a structure** — if the user has not supplied one, generate it first.
 2. **Prepare inputs** — run the appropriate `vasp_tools.py prepare_*` command.
-3. **Submit jobs** — pass the returned `calc_dir_list` to the `dpdisp-submit` skill by generating a `submission.json` (see [Submission — dpdisp-submit skill](#submission-dpdisp-skill) below).
+3. **Submit jobs** — pass the returned `calc_dir_list` to the `dpdisp-submit` skill by generating a `submission.json`.
 4. **Collect / read results** — after the job finishes, run `collect_results` or `read_results`.
 
 Run exactly **one property step at a time**. Do not chain relaxation + SCF in a single step.
-
----
-
-## vasp_tools.py — Command reference
-
-### Common flags (all prepare_* commands)
-
-| Flag | Default | Description |
-|---|---|---|
-| `--config PATH` | `config.yaml` next to the script | Path to config.yaml |
-| `--incar_tags JSON` | `{}` | Extra INCAR overrides, e.g. `'{"ENCUT": 600}'` |
-| `--potcar_map JSON` | `{}` | Element → POTCAR label, e.g. `'{"Bi": "Bi_d"}'` |
-
-All `prepare_*` commands return:
-```json
-{ "status": "success", "calc_dir_list": ["<abs_path>", ...] }
-```
 
 ---
 
@@ -185,79 +164,36 @@ run_skill_script(skill_name="vasp", script_name="vasp_tools.py", args="read_resu
 ---
 
 
-## Submission — `dpdisp-submit` skill {#submission-dpdisp-skill}
+## Submission 
+### `bohrium` skill (Recommended for Bohrium users)
+Submit jobs to Bohrium using the `bohrium` skill, which wraps the `bohr` CLI. This is the recommended submission method for users running on the Bohrium platform.
 
-Submission is handled by the `dpdisp-submit` skill (DPDispatcher), which supports both Bohrium and standard Slurm/HPC clusters. See the `dpdisp-submit` skill documentation for full details and schema.
+### `dpdisp` skill (Not recommended for Bohrium users)
+Submission is handled by the `dpdisp` skill (DPDispatcher), which supports Both Bohrium and standard Slurm/HPC clusters. See the `dpdisp` skill documentation for full details and schema.
 
-For the full VASP-specific Bohrium `submission.json` template, environment variables, and submission flow, load the reference:
-
+For VASP job submission on Bohrium platform using DPDispatcher, see:
 ```
 load_skill_resource(skill_name="vasp", path="references/bohrium-submission.md")
 ```
 
 ---
 
-
-## End-to-end example: relaxation → SCF → band structure
-
-```
-# 1. Prepare relaxation
-run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
-    args="prepare_relaxation --structure Al.extxyz")
-# → returns {"status": "success", "calc_dir_list": [...]}
-
-# 2. Generate submission.template.json for relaxation (see above for schema)
-#    (Repeat for each calc_dir as a task in task_list)
-
-# 3. Substitute environment variables
-envsubst '${BOHRIUM_USERNAME} ${BOHRIUM_PASSWORD} ${BOHRIUM_PROJECT_ID} ${BOHRIUM_VASP_MACHINE} ${BOHRIUM_VASP_IMAGE}' < submission.template.json > submission.json
-
-# 4. Validate and submit
-uv run -m json.tool submission.json >/dev/null
-uvx --with dpdispatcher dargs check -f dpdispatcher.entrypoints.submit.submission_args submission.json
-uvx --from dpdispatcher --with oss2 dpdisp submit submission.json
-
-# 5. Read relaxation results
-run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
-    args="read_results --calc_type relaxation --calc_dir <relax_dir>")
-
-# 6. Prepare SCF from relaxed structure (CONTCAR → extxyz conversion needed, or pass CONTCAR directly)
-run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
-    args="prepare_scf --structure Al_relaxed.extxyz")
-
-# 7. Repeat submission steps for SCF (adjust forward/backward files as needed)
-
-# 8. Prepare NSCF k-path from SCF output
-run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
-    args="prepare_nscf_kpath --scf_dirs <scf_dir1> [<scf_dir2> ...]")
-
-# 9. Repeat submission steps for NSCF
-
-# 10. Read NSCF results (band gap, CBM/VBM)
-run_skill_script(skill_name="vasp", script_name="vasp_tools.py",
-    args="read_results --calc_type nscf --calc_dir <nscf_dir>")
-```
-
----
-
 ## Configuration file (config.yaml)
 
-`config.yaml` lives in the same directory as `vasp_tools.py`. It controls:
+`config.yaml` lives in the Skill references directory. It controls:
 
-- `work_dir` — where all calculation subdirectories are created (default `/tmp/vasp_server`).
+- `work_dir` — where all calculation subdirectories are created (default `"vasp"`, resolved relative to the session directory).
+
 - `VASP_default_INCAR` — one sub-key per preset (`relaxation`, `scf_nsoc`, `scf_soc`, `nscf_nsoc`, `nscf_soc`).
 
-**When asked about default INCAR settings, read `config.yaml` directly** — do not guess from memory, as the user may have edited it.
-
-Use `run_bash` to inspect it:
-```bash
-cat "$(python -c "import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec('vasp_tools').origin).parent if importlib.util.find_spec('vasp_tools') else '.')")/config.yaml"
+You can check the default INCAR settings by reading `config.yaml` with `load_skill_resource`:
 ```
-Or simply ask the agent to read it via `read_workspace_file("skills/vasp/config.yaml")`.
+load_skill_resource(skill_name="vasp", path="references/config.yaml")
+```
 
-To override individual tags for a single run without editing the file, use `--incar_tags`:
+To override individual tags for a single run without editing the file, use `--incar_tags` when running `prepare_*` sub-commands of the `vasp_tools.py` script. 
+
 ```bash
 --incar_tags '{"ENCUT": 600, "EDIFF": 1e-6}'
 ```
 
-To permanently change a default, edit the relevant preset in `config.yaml` directly.

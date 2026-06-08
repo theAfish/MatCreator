@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from collections import deque
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 _skill_kg:  Optional[KnowledgeGraph] = None
 _memory_kg: Optional[KnowledgeGraph] = None
+
+_EMBED_CACHE_MAXSIZE = 256
 
 # Embedding model — set EMBEDDING_MODEL env var to match your provider, e.g.:
 #   OpenAI:     text-embedding-3-small
@@ -60,7 +63,14 @@ def _embedding_model() -> str:
     return os.environ.get("LLM_MODEL", LLM_MODEL)
 
 
-def _embed_texts(texts: list[str]) -> list[list[float]] | None:
+@functools.lru_cache(maxsize=_EMBED_CACHE_MAXSIZE)
+def _embed_texts_cached(texts_tuple: tuple[str, ...]) -> tuple[tuple[float, ...], ...] | None:
+    """Cached version of _embed_texts — keyed by tuple of input texts."""
+    texts = list(texts_tuple)
+    return _embed_texts_uncached(texts)
+
+
+def _embed_texts_uncached(texts: list[str]) -> list[list[float]] | None:
     """Call litellm embedding API for a batch of texts. Returns None on failure."""
     try:
         from litellm import embedding as litellm_embedding
@@ -85,9 +95,25 @@ def _embed_texts(texts: list[str]) -> list[list[float]] | None:
         return None
 
 
+def _embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """Call litellm embedding API with LRU cache for a batch of texts."""
+    result = _embed_texts_cached(tuple(texts))
+    if result is None:
+        return None
+    return [list(vec) for vec in result]
+
+
+@functools.lru_cache(maxsize=_EMBED_CACHE_MAXSIZE)
+def _embed_one_cached(text: str) -> tuple[float, ...] | None:
+    result = _embed_texts_uncached([text])
+    if result is None:
+        return None
+    return tuple(result[0])
+
+
 def _embed_one(text: str) -> list[float] | None:
-    result = _embed_texts([text])
-    return result[0] if result else None
+    result = _embed_one_cached(text)
+    return list(result) if result else None
 
 
 def _node_text(name: str, description: str) -> str:
@@ -123,10 +149,28 @@ def _top_k_semantic(
 # Lazy backfill
 # ---------------------------------------------------------------------------
 
+_skill_backfill_complete = False
+_memory_backfill_complete = False
+
+
 def _backfill_embeddings(kg: KnowledgeGraph) -> None:
     """Compute and store embeddings for any nodes that are missing one."""
+    global _skill_backfill_complete, _memory_backfill_complete
+
+    from ..constants import SKILL_GRAPH_DB, MEMORY_GRAPH_DB
+    if kg._engine.url.database and SKILL_GRAPH_DB.name in str(kg._engine.url):
+        if _skill_backfill_complete:
+            return
+    elif kg._engine.url.database and MEMORY_GRAPH_DB.name in str(kg._engine.url):
+        if _memory_backfill_complete:
+            return
+
     missing = kg.get_nodes_without_embeddings()
     if not missing:
+        if kg._engine.url.database and SKILL_GRAPH_DB.name in str(kg._engine.url):
+            _skill_backfill_complete = True
+        elif kg._engine.url.database and MEMORY_GRAPH_DB.name in str(kg._engine.url):
+            _memory_backfill_complete = True
         return
 
     logger.info("Backfilling embeddings for %d nodes…", len(missing))
@@ -138,6 +182,11 @@ def _backfill_embeddings(kg: KnowledgeGraph) -> None:
     for node, vec in zip(missing, vecs):
         kg.set_embedding(node.id, vec)
     logger.info("Backfill complete.")
+
+    if kg._engine.url.database and SKILL_GRAPH_DB.name in str(kg._engine.url):
+        _skill_backfill_complete = True
+    elif kg._engine.url.database and MEMORY_GRAPH_DB.name in str(kg._engine.url):
+        _memory_backfill_complete = True
 
 
 # ---------------------------------------------------------------------------
@@ -382,11 +431,14 @@ def search_skills(query: str, top_k: int = 5) -> str:
     Returns:
         Markdown list of matching skill names and descriptions, ranked by relevance.
     """
+    from ..config import get_disabled_skills
     kg = _get_skill_kg()
     try:
         node_ids = _find_seeds(kg, query, top_k=top_k, category="skill")
         if not node_ids:
             return f"No skills found for '{query}'."
+
+        disabled = set(get_disabled_skills())
 
         for nid in node_ids:
             kg.increment_reference(nid)
@@ -394,7 +446,7 @@ def search_skills(query: str, top_k: int = 5) -> str:
         lines = []
         for nid in node_ids:
             node = kg.get_node(nid)
-            if not node:
+            if not node or node.name in disabled:
                 continue
             line = f"- **{node.name}**"
             if node.description:
@@ -460,10 +512,13 @@ def get_related_skills(start_node: str, top_k: int = 5, depth: int = 2) -> str:
         for nid in top_ids:
             kg.increment_reference(nid)
 
+        from ..config import get_disabled_skills
+        disabled = set(get_disabled_skills())
+
         lines = []
         for nid in top_ids:
             node = kg.get_node(nid)
-            if not node:
+            if not node or node.name in disabled:
                 continue
             line = f"- **{node.name}**"
             if node.description:

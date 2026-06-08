@@ -3,12 +3,16 @@
 Called after execution results return to the planner. Captures the global
 narrative (why, key decisions, failures) that per-step trajectory entries miss.
 Saved to {workspace}/trajectories/{session_id}_summary.json for the extractor.
+
+File writes are dispatched to a background thread so the agent is not blocked
+on disk I/O during response generation.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -19,6 +23,8 @@ from pydantic import BaseModel, Field, ValidationError
 from ...workspace import get_workspace_root
 
 logger = logging.getLogger(__name__)
+
+_io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="summary-io")
 
 
 class SessionSummary(BaseModel):
@@ -49,6 +55,9 @@ def write_session_summary(summary: dict, tool_context: ToolContext) -> dict:
     The summary is saved alongside the trajectory JSONL and is read by the
     knowledge extractor to build richer graph entries.
 
+    File I/O is dispatched to a background thread — the function returns
+    immediately after validation without blocking on disk writes.
+
     Args:
         summary: Dict with keys:
             - goal (str): Original user goal in their own words.
@@ -70,13 +79,12 @@ def write_session_summary(summary: dict, tool_context: ToolContext) -> dict:
         data["session_id"] = session_id
         data["timestamp"] = datetime.now(timezone.utc).isoformat()
 
-        summary_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        logger.info("Session summary written to %s", summary_path)
+        _io_executor.submit(_write_summary_file, summary_path, data)
 
         return {
             "status": "ok",
             "path": str(summary_path),
-            "message": "Session summary saved. The knowledge extractor will use it to build the knowledge graph.",
+            "message": "Session summary queued. The knowledge extractor will use it to build the knowledge graph.",
         }
     except ValidationError as exc:
         return {
@@ -89,3 +97,12 @@ def write_session_summary(summary: dict, tool_context: ToolContext) -> dict:
             "status": "error",
             "message": f"Unexpected error: {exc}",
         }
+
+
+def _write_summary_file(path: Path, data: dict) -> None:
+    """Background worker: write the summary JSON to disk."""
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        logger.info("Session summary written to %s", path)
+    except Exception as exc:
+        logger.warning("Failed to write session summary to %s: %s", path, exc)
