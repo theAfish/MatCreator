@@ -445,6 +445,7 @@ class AgentGraphView {
   }
 
   startPolling(sessionId) {
+    this._currentSessionId = sessionId;
     this._setStatus("polling");
     this._poll(sessionId);
     this._pollInterval = setInterval(() => this._poll(sessionId), 2000);
@@ -462,6 +463,7 @@ class AgentGraphView {
     try {
       const resp = await fetch(`/api/agent-graph/${sessionId}`);
       if (!resp.ok) return;
+      if (sessionId !== this._currentSessionId) return;
       const data = await resp.json();
       this.update(data);
     } catch (_) {
@@ -470,6 +472,7 @@ class AgentGraphView {
   }
 
   reset() {
+    this._currentSessionId = null;
     this._nodes.clear();
     this._edges.clear();
     this._nodeData = {};
@@ -781,6 +784,7 @@ class ExecutionPlanView {
   }
 
   startPolling(sessionId) {
+    this._currentSessionId = sessionId;
     this._setStatus("polling");
     this._poll(sessionId);
     this._pollInterval = setInterval(() => this._poll(sessionId), 2000);
@@ -798,12 +802,14 @@ class ExecutionPlanView {
     try {
       const resp = await fetch(`/api/execution-graph/${sessionId}`);
       if (!resp.ok) return;
+      if (sessionId !== this._currentSessionId) return;
       const data = await resp.json();
       this.update(data);
     } catch (_) {}
   }
 
   reset() {
+    this._currentSessionId = null;
     this._network?.setData({ nodes: new DataSet([]), edges: new DataSet([]) });
     this._didInitialFit = false;
     this._structureKey = null;
@@ -2192,7 +2198,8 @@ async function sendMessage(message) {
   autoResizeTextInput();
 
   if (!state.sessionReady) await createSession();
-
+  agentGraph.reset();
+  planGraph.reset();
   agentGraph.startPolling(state.sessionId);
   planGraph.startPolling(state.sessionId);
 

@@ -59,7 +59,10 @@ def load_skills() -> list:
     skills = []
     for path in _discover_skill_dirs(_MODULE_SKILLS_ROOT):
         default_names.add(path.name)
-        skills.append(load_skill_from_dir(path))
+        try:
+            skills.append(load_skill_from_dir(path))
+        except Exception as exc:
+            logger.error("Failed to load default skill '%s', skipping: %s", path.name, exc)
     for path in _discover_skill_dirs(workspace_skills_dir()):
         if path.name in default_names:
             logger.warning(
@@ -67,7 +70,10 @@ def load_skills() -> list:
                 path.name,
             )
             continue
-        skills.append(load_skill_from_dir(path))
+        try:
+            skills.append(load_skill_from_dir(path))
+        except Exception as exc:
+            logger.error("Failed to load custom skill '%s', skipping: %s", path.name, exc)
     return skills
 
 

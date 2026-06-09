@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 from typing import List
 
+import yaml
+
 from dotenv import dotenv_values
 from dotenv import set_key as dotenv_set_key
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -608,6 +610,26 @@ async def list_default_skill_names() -> JSONResponse:
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
+def _validate_skill_md_name(content: bytes, expected_name: str) -> None:
+    """Raise ValueError if the SKILL.md frontmatter name field doesn't match expected_name."""
+    text = content.decode("utf-8", errors="replace")
+    parts = text.split("---")
+    if len(parts) < 3:
+        return  # No frontmatter; ADK will catch structural issues later
+    try:
+        frontmatter = yaml.safe_load(parts[1])
+    except yaml.YAMLError as exc:
+        raise ValueError(f"SKILL.md has invalid YAML frontmatter: {exc}")
+    if not isinstance(frontmatter, dict):
+        return
+    md_name = frontmatter.get("name")
+    if md_name is not None and md_name != expected_name:
+        raise ValueError(
+            f"SKILL.md 'name' field ('{md_name}') does not match the skill directory name ('{expected_name}'). "
+            f"Update the 'name' field in SKILL.md to '{expected_name}'."
+        )
+
+
 @app.post("/api/skills/custom")
 async def create_custom_skill(
     name: str = Form(...),
@@ -633,6 +655,10 @@ async def create_custom_skill(
 
     try:
         skill_md_content = await skill_md.read()
+        try:
+            _validate_skill_md_name(skill_md_content, name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         (skill_dir / "SKILL.md").write_bytes(skill_md_content)
 
         ref_names = []
@@ -663,7 +689,11 @@ async def create_custom_skill(
         for s in scripts:
             await s.close()
 
-    refresh_skills()
+    try:
+        refresh_skills()
+    except Exception as exc:
+        shutil.rmtree(skill_dir, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=f"Skill files were written but failed to load: {exc}")
     return JSONResponse({"status": "ok", "name": name, "references": ref_names, "scripts": script_names})
 
 
@@ -688,7 +718,10 @@ async def delete_custom_skill(skill_name: str) -> JSONResponse:
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to delete skill: {exc}")
 
-    refresh_skills()
+    try:
+        refresh_skills()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Skill deleted but registry reload failed: {exc}")
     return JSONResponse({"status": "ok", "deleted": skill_name})
 
 
@@ -715,7 +748,10 @@ async def update_settings(body: SettingsBody) -> JSONResponse:
     if body.skills is not None:
         config.setdefault("skills", {}).update(body.skills)
     save_config(config)
-    refresh_skills()
+    try:
+        refresh_skills()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Settings saved but skill registry reload failed: {exc}")
     return JSONResponse({
         "status": "ok",
         "planning_skill_names": sorted(PLANNING_SKILL_NAMES),
