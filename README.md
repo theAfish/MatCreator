@@ -104,9 +104,16 @@ An example content of `.env`:
 
 ```env
 LLM_MODEL= "MODEL_TYPE"
+GRAPH_AGENT_MODEL="MODEL_TYPE"             # optional; defaults to LLM_MODEL
+REVIEW_AGENT_MODEL="MODEL_TYPE"            # optional; defaults to GRAPH_AGENT_MODEL
 LLM_API_KEY="API_KEYS"
 LLM_BASE_URL="BASE_URL"
-EMBEDDING_MODEL="EMBEDDING_MODEL_TYPE"        
+KDG_DB_PATH="agents/MatCreator/.adk/know_do_graph.db"
+EMBEDDING_MODEL="EMBEDDING_MODEL_TYPE"
+MATCREATOR_AUTO_REVIEW=1
+MATCREATOR_REVIEW_TRIGGER_THRESHOLD=20
+MATCREATOR_REVIEW_BATCH_SIZE=5
+MATCREATOR_REVIEW_STRATEGY=auto             # auto, seed, or global
 
 # SKILL_RELATED_ENV
 CGCNN_ROOT=user/cgcnn                         # CGCNN project directory
@@ -209,22 +216,20 @@ To customize a skill manually, copy its skill directory into your workspace `ski
 
 The agent can also create and update skills on its own. During a session, the thinking agent can call built-in tools to scaffold a new skill file, write updated content to an existing one, or list what skills are currently available — letting the system accumulate knowledge automatically over time.
 
-## Skill Graph
+## Know-Do Graph
 
-MatCreator organizes its knowledge as a graph of nodes and edges, stored in two separate SQLite databases:
+MatCreator uses `know-do-graph` for both durable knowledge and working memory:
 
-- **`skill_graph.db`** — developer-maintained, immutable nodes seeded from the skills directory.
-- **`memory_graph.db`** — agent-learned nodes written during sessions; subject to synthesis and pruning.
+- **Know-Do Graph** stores curated capabilities, procedures, workflows, and
+  distilled heuristics in `agents/MatCreator/.adk/know_do_graph.db` by default.
+- **MemGraph** stores frequently updated agent observations as
+  `EntryType.memory` nodes and normal graph edges in the same SQLite database.
 
-In skill graph, each node belongs to one of three categories:
-
-| Type | Description |
-|------|-------------|
-| **Concept** | Foundational domain knowledge and reference material (e.g. DFT theory, force-field conventions). Used as planning guidance rather than executable steps. |
-| **Skill** | A self-contained, executable capability backed by a `SKILL.md` file (e.g. `vasp_relaxation`, `mattergen_generation`). The agent calls these during execution. |
-| **Workflow** | A higher-level template that orchestrates multiple skills into a reusable sequence (e.g. a full MLFF training pipeline). |
-
-Edges capture relationships between nodes (`depends_on`, `belongs_to`, `relates_to`). Semantic embeddings on every node enable vector search, so the agent can retrieve relevant skills and concepts by meaning rather than exact name.
+Skills and guides are seeded as durable entries. Agent writes first land in
+MemGraph; repeated successful observations are later distilled into validated
+Know-Do heuristics and linked to the capabilities they improve. Existing
+`skill_graph.db`, `memory_graph.db`, old JSON traces, and `MEMORY.md` data can be migrated
+idempotently. See [docs/knowledge_graph.md](docs/knowledge_graph.md).
 
 ## Graph-Based Planning
 

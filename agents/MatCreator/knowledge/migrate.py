@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 import re
 
-from .graph_store import KnowledgeGraph  # noqa: F401 (kept for type hints)
-from .query import _get_memory_kg
+from .kdg_memory import add_memory
+from .query import _get_kg
 
 logger = logging.getLogger(__name__)
 
@@ -51,25 +51,24 @@ def migrate_memory_md(memory_path: str | None = None) -> dict:
         if len(cleaned) >= 10:
             entries.append(cleaned)
 
-    kg = _get_memory_kg()
+    kg = _get_kg()
+    memory = kg.memory("legacy-memory-md")
+    existing = {entry.content.casefold() for entry in memory.list()}
     created = 0
     skipped = 0
 
     for entry in entries:
-        name = entry[:80].rstrip(".")
-        node = kg.upsert_node(
-            category="memory",
-            name=name,
-            description=entry,
-            content={"raw": entry, "source": "MEMORY.md"},
-            source_session="migration",
-            confidence=0.9,
-        )
-        # If the node was just created (source_session will be "migration")
-        if node.source_session == "migration" and not node.reference_count:
-            created += 1
-        else:
+        if entry.casefold() in existing:
             skipped += 1
+            continue
+        add_memory(
+            kg,
+            "legacy-memory-md",
+            entry,
+            tags=["memory-md", "migrated"],
+        )
+        existing.add(entry.casefold())
+        created += 1
 
     logger.info("Migration: %d created, %d skipped", created, skipped)
     return {
@@ -77,7 +76,7 @@ def migrate_memory_md(memory_path: str | None = None) -> dict:
         "nodes_created": created,
         "skipped": skipped,
         "message": (
-            f"Migrated MEMORY.md: {created} new Insight nodes, "
+            f"Migrated MEMORY.md: {created} working-memory entries, "
             f"{skipped} skipped (near-duplicates)."
         ),
     }

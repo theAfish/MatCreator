@@ -118,7 +118,7 @@ ALL_SKILLS_TOOLSET = MatCreatorSkillToolset(ALL_SKILLS)
 
 
 def seed_skills_to_graph() -> dict:
-    """Upsert all workspace skills and guides as skill nodes in the knowledge graph.
+    """Upsert all workspace skills and guides into Know-Do Graph.
 
     Each node stores only name + description (from SKILL.md / guide frontmatter).
     Full instructions remain in the source files and are loaded via `load_skill`.
@@ -128,39 +128,53 @@ def seed_skills_to_graph() -> dict:
     After all nodes are seeded, ``depends_on`` edges are created between skill
     nodes based on the ``dependent_skills`` field in each SKILL.md's metadata.
     """
-    from .knowledge.query import _get_skill_kg, _embed_one, _node_text
+    from know_do_graph import (
+        EdgeRelation,
+        EntryMetadata,
+        EntryType,
+        RefinementStatus,
+        VerificationStatus,
+    )
+    from .knowledge.kdg_memory import connect_once, upsert_entry
+    from .knowledge.query import _get_kg
     from .guide import ALL_GUIDES
 
-    kg = _get_skill_kg()
+    kg = _get_kg()
     seeded = 0
     skill_node_ids: dict[str, str] = {}
 
     for skill in ALL_SKILLS:
-        node = kg.upsert_node(
-            category="skill",
-            name=skill.name,
-            description=skill.description or "",
-            immutable=True,
+        node, created = upsert_entry(
+            kg,
+            title=skill.name,
+            content=skill.description or "",
+            entry_type=EntryType.capability,
+            tags=["matcreator-skill", "managed"],
+            metadata=EntryMetadata(
+                source_provenance="SKILL.md",
+                refinement_status=RefinementStatus.validated,
+                verification_status=VerificationStatus.peer_reviewed,
+                custom={"managed_by": "matcreator", "kind": "skill"},
+            ),
         )
-        if node.embedding is None:
-            vec = _embed_one(_node_text(node.name, node.description or ""))
-            if vec:
-                kg.set_embedding(node.id, vec)
         skill_node_ids[skill.name] = node.id
-        seeded += 1
+        seeded += int(created)
 
     for guide in ALL_GUIDES:
-        node = kg.upsert_node(
-            category="skill",
-            name=guide.name,
-            description=guide.description or "",
-            immutable=True,
+        _, created = upsert_entry(
+            kg,
+            title=guide.name,
+            content=guide.description or "",
+            entry_type=EntryType.procedure,
+            tags=["matcreator-skill", "matcreator-guide", "managed"],
+            metadata=EntryMetadata(
+                source_provenance="guide",
+                refinement_status=RefinementStatus.validated,
+                verification_status=VerificationStatus.peer_reviewed,
+                custom={"managed_by": "matcreator", "kind": "guide"},
+            ),
         )
-        if node.embedding is None:
-            vec = _embed_one(_node_text(node.name, node.description or ""))
-            if vec:
-                kg.set_embedding(node.id, vec)
-        seeded += 1
+        seeded += int(created)
 
     # Create dependency edges from dependent_skills metadata
     edges_created = 0
@@ -170,14 +184,21 @@ def seed_skills_to_graph() -> dict:
         for dep_name in deps:
             tgt_id = skill_node_ids.get(dep_name)
             if src_id and tgt_id:
-                kg.upsert_edge(src_id, tgt_id, "depends_on")
-                edges_created += 1
+                edges_created += int(
+                    connect_once(
+                        kg,
+                        src_id,
+                        tgt_id,
+                        relation=EdgeRelation.dependency,
+                    )
+                )
             else:
                 logger.warning(
                     "dependent_skills: '%s' references unknown skill '%s'",
                     skill.name, dep_name,
                 )
 
+    kg.refresh()
     return {"status": "ok", "seeded": seeded, "edges_created": edges_created}
 
 

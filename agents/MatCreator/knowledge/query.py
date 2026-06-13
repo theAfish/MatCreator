@@ -1,533 +1,247 @@
-"""Semantic + BFS retrieval for the knowledge graph."""
+"""Retrieval and write tools for unified Know-Do Graph storage."""
 
 from __future__ import annotations
 
-import functools
 import logging
 import os
-from collections import deque
-from datetime import datetime, timezone
 from typing import Optional
 
-import numpy as np
+from know_do_graph import (
+    Entry,
+    EntryType,
+    KnowDoGraph,
+)
 
-from .graph_store import KnowledgeGraph
-from .schema import KgNode
+from .kdg_memory import (
+    add_memory,
+    increment_usage,
+    migrate_kdg_database,
+    migrate_legacy_memory_json,
+    migrate_legacy_graphs,
+)
+from .review import (
+    normalize_review_model,
+    review_policy,
+    review_threshold,
+)
 
 logger = logging.getLogger(__name__)
-
-_skill_kg:  Optional[KnowledgeGraph] = None
-_memory_kg: Optional[KnowledgeGraph] = None
-
-_EMBED_CACHE_MAXSIZE = 256
-
-# Embedding model — set EMBEDDING_MODEL env var to match your provider, e.g.:
-#   OpenAI:     text-embedding-3-small
-#   DashScope:  text-embedding-v3
-#   Ollama:     ollama/nomic-embed-text
-# Defaults to the chat LLM model as a best-effort fallback (works for some providers).
-_DEFAULT_EMBEDDING_MODEL = None  # resolved at call time from LLM_MODEL
+_graph: Optional[KnowDoGraph] = None
+_migration_result: dict[str, int] | None = None
 
 
-def _get_skill_kg() -> KnowledgeGraph:
-    global _skill_kg
-    if _skill_kg is None:
-        from ..constants import SKILL_GRAPH_DB
-        _skill_kg = KnowledgeGraph(db_path=SKILL_GRAPH_DB)
-    return _skill_kg
-
-
-def _get_memory_kg() -> KnowledgeGraph:
-    global _memory_kg
-    if _memory_kg is None:
-        from ..constants import MEMORY_GRAPH_DB
-        _memory_kg = KnowledgeGraph(db_path=MEMORY_GRAPH_DB)
-    return _memory_kg
-
-
-# Backward-compat alias used by skill.py and other internal callers
-_get_kg = _get_skill_kg
-
-
-# ---------------------------------------------------------------------------
-# Embedding helpers
-# ---------------------------------------------------------------------------
-
-def _embedding_model() -> str:
-    explicit = os.environ.get("EMBEDDING_MODEL", "").strip()
-    if explicit:
-        return explicit
-    # Fall back to the chat model — works for providers that expose both
-    # chat and embedding under the same model name (e.g. some Ollama models).
-    from ..constants import LLM_MODEL
-    return os.environ.get("LLM_MODEL", LLM_MODEL)
-
-
-@functools.lru_cache(maxsize=_EMBED_CACHE_MAXSIZE)
-def _embed_texts_cached(texts_tuple: tuple[str, ...]) -> tuple[tuple[float, ...], ...] | None:
-    """Cached version of _embed_texts — keyed by tuple of input texts."""
-    texts = list(texts_tuple)
-    return _embed_texts_uncached(texts)
-
-
-def _embed_texts_uncached(texts: list[str]) -> list[list[float]] | None:
-    """Call litellm embedding API for a batch of texts. Returns None on failure."""
-    try:
-        from litellm import embedding as litellm_embedding
-        from ..constants import LLM_API_KEY, LLM_BASE_URL
-
-        api_key  = os.environ.get("LLM_API_KEY", LLM_API_KEY)
-        base_url = os.environ.get("LLM_BASE_URL", LLM_BASE_URL) or None
-
-        response = litellm_embedding(
-            model=_embedding_model(),
-            input=texts,
-            api_key=api_key,
-            api_base=base_url,
-            encoding_format="float",
-            drop_params=True,
-        )
-        return [item["embedding"] for item in response.data]
-    except Exception as exc:
-        logger.warning(
-            "Embedding API unavailable (model=%s, error=%s): falling back to token search",
-            _embedding_model(), exc,
-        )
-        return None
-
-
-def _embed_texts(texts: list[str]) -> list[list[float]] | None:
-    """Call litellm embedding API with LRU cache for a batch of texts."""
-    result = _embed_texts_cached(tuple(texts))
-    if result is None:
-        return None
-    return [list(vec) for vec in result]
-
-
-@functools.lru_cache(maxsize=_EMBED_CACHE_MAXSIZE)
-def _embed_one_cached(text: str) -> tuple[float, ...] | None:
-    result = _embed_texts_uncached([text])
-    if result is None:
-        return None
-    return tuple(result[0])
-
-
-def _embed_one(text: str) -> list[float] | None:
-    result = _embed_one_cached(text)
-    return list(result) if result else None
-
-
-def _node_text(name: str, description: str) -> str:
-    """Text used for embedding — name carries more weight via repetition."""
-    return f"{name}. {name}. {description}".strip()
-
-
-# ---------------------------------------------------------------------------
-# Cosine similarity
-# ---------------------------------------------------------------------------
-
-def _cosine_sim(a: list[float], b: list[float]) -> float:
-    va, vb = np.array(a, dtype=np.float32), np.array(b, dtype=np.float32)
-    denom = np.linalg.norm(va) * np.linalg.norm(vb)
-    return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
-
-
-def _top_k_semantic(
-    query_vec: list[float],
-    embeddings: list[tuple[str, list[float]]],
-    top_k: int,
-) -> list[str]:
-    """Return node IDs sorted by cosine similarity to query_vec."""
-    scored = [
-        (node_id, _cosine_sim(query_vec, emb))
-        for node_id, emb in embeddings
-    ]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [nid for nid, _ in scored[:top_k]]
-
-
-# ---------------------------------------------------------------------------
-# Lazy backfill
-# ---------------------------------------------------------------------------
-
-_skill_backfill_complete = False
-_memory_backfill_complete = False
-
-
-def _backfill_embeddings(kg: KnowledgeGraph) -> None:
-    """Compute and store embeddings for any nodes that are missing one."""
-    global _skill_backfill_complete, _memory_backfill_complete
-
-    from ..constants import SKILL_GRAPH_DB, MEMORY_GRAPH_DB
-    if kg._engine.url.database and SKILL_GRAPH_DB.name in str(kg._engine.url):
-        if _skill_backfill_complete:
-            return
-    elif kg._engine.url.database and MEMORY_GRAPH_DB.name in str(kg._engine.url):
-        if _memory_backfill_complete:
-            return
-
-    missing = kg.get_nodes_without_embeddings()
-    if not missing:
-        if kg._engine.url.database and SKILL_GRAPH_DB.name in str(kg._engine.url):
-            _skill_backfill_complete = True
-        elif kg._engine.url.database and MEMORY_GRAPH_DB.name in str(kg._engine.url):
-            _memory_backfill_complete = True
+def _configure_auto_review(graph: KnowDoGraph) -> None:
+    """Attach KDG's policy-controlled durable-node review scheduler."""
+    enabled = os.environ.get("MATCREATOR_AUTO_REVIEW", "1").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
         return
 
-    logger.info("Backfilling embeddings for %d nodes…", len(missing))
-    texts = [_node_text(n.name, n.description or "") for n in missing]
-    vecs = _embed_texts(texts)
-    if vecs is None:
-        return
+    from ..constants import GRAPH_AGENT_MODEL, LLM_API_KEY, LLM_BASE_URL
 
-    for node, vec in zip(missing, vecs):
-        kg.set_embedding(node.id, vec)
-    logger.info("Backfill complete.")
-
-    if kg._engine.url.database and SKILL_GRAPH_DB.name in str(kg._engine.url):
-        _skill_backfill_complete = True
-    elif kg._engine.url.database and MEMORY_GRAPH_DB.name in str(kg._engine.url):
-        _memory_backfill_complete = True
-
-
-# ---------------------------------------------------------------------------
-# Seed finding — semantic primary, LIKE fallback
-# ---------------------------------------------------------------------------
-
-def _find_seeds(kg: KnowledgeGraph, query: str, top_k: int = 10, category: Optional[str] = None) -> list[str]:
-    """Return seed node IDs using semantic search with LIKE as fallback."""
-    _backfill_embeddings(kg)
-    query_vec = _embed_one(_node_text(query, ""))
-    if query_vec is not None:
-        all_embeddings = kg.get_all_embeddings()
-        if all_embeddings:
-            if category:
-                # Filter embeddings to only the requested category
-                with kg._Session() as sess:
-                    from sqlalchemy import select as sa_select
-                    cat_ids = {
-                        row.id for row in sess.execute(
-                            sa_select(KgNode.id).where(KgNode.category == category)
-                        ).all()
-                    }
-                all_embeddings = [(nid, emb) for nid, emb in all_embeddings if nid in cat_ids]
-            return _top_k_semantic(query_vec, all_embeddings, top_k)
-
-    # Fallback: substring match on name
-    logger.debug("Using LIKE fallback for query '%s'", query)
-    nodes = kg.find_nodes_by_name(query, category=category)
-    return [n.id for n in nodes[:top_k]]
+    threshold = review_threshold()
+    model = normalize_review_model(
+        os.environ.get("REVIEW_AGENT_MODEL")
+        or os.environ.get("GRAPH_AGENT_MODEL", GRAPH_AGENT_MODEL)
+    )
+    api_key = (
+        os.environ.get("LLM_API_KEY")
+        or LLM_API_KEY
+        or os.environ.get("MINIMAX_API_KEY", "")
+    )
+    base_url = (
+        os.environ.get("LLM_BASE_URL")
+        or LLM_BASE_URL
+        or os.environ.get("MINIMAX_API_BASE")
+        or None
+    )
+    batch_size = int(os.environ.get("MATCREATOR_REVIEW_BATCH_SIZE", "5"))
+    graph.auto_review(
+        threshold=threshold,
+        policy=review_policy(),
+        strategy=os.environ.get("MATCREATOR_REVIEW_STRATEGY", "auto"),
+        include_existing=True,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        batch_size=batch_size,
+    )
 
 
-def _find_node_id_by_name(kg: KnowledgeGraph, name: str, category: str = "skill") -> str | None:
-    """Resolve a node name to its ID: exact → case-insensitive → substring match."""
-    with kg._Session() as sess:
-        from sqlalchemy import select as sa_select
-        for clause in [
-            KgNode.name == name,
-            KgNode.name.ilike(name),
-            KgNode.name.ilike(f"%{name}%"),
-        ]:
-            node = sess.execute(
-                sa_select(KgNode).where(clause, KgNode.category == category)
-            ).scalars().first()
-            if node:
-                return node.id
-    return None
+def _get_kg() -> KnowDoGraph:
+    global _graph, _migration_result
+    if _graph is None:
+        from ..constants import (
+            KNOW_DO_GRAPH_DB,
+            KNOW_DO_MEMORY_DIR,
+            LEGACY_MEMORY_GRAPH_DB,
+            LEGACY_SKILL_GRAPH_DB,
+            LEGACY_UNIFIED_GRAPH_DB,
+            LEGACY_UNIFIED_MEMORY_DIR,
+        )
+
+        _graph = KnowDoGraph(path=KNOW_DO_GRAPH_DB, memory_dir=KNOW_DO_MEMORY_DIR)
+        unified = {"nodes": 0, "edges": 0}
+        if LEGACY_UNIFIED_GRAPH_DB.resolve() != KNOW_DO_GRAPH_DB.resolve():
+            unified = migrate_kdg_database(_graph, LEGACY_UNIFIED_GRAPH_DB)
+        memories = migrate_legacy_memory_json(_graph, LEGACY_UNIFIED_MEMORY_DIR)
+        legacy = migrate_legacy_graphs(
+            _graph,
+            skill_db=LEGACY_SKILL_GRAPH_DB,
+            memory_db=LEGACY_MEMORY_GRAPH_DB,
+        )
+        _migration_result = {
+            "know_do_nodes": unified["nodes"] + legacy["know_do_nodes"],
+            "memory_entries": memories + legacy["memory_entries"],
+            "edges": unified["edges"] + legacy["edges"],
+        }
+        _configure_auto_review(_graph)
+    return _graph
 
 
-# ---------------------------------------------------------------------------
-# Ranking
-# ---------------------------------------------------------------------------
+def get_migration_result() -> dict[str, int]:
+    _get_kg()
+    return dict(_migration_result or {})
 
-def _recency_decay(created_at_iso: str) -> float:
+
+# Compatibility aliases for callers from the previous split implementation.
+_get_skill_kg = _get_kg
+_get_memory_kg = _get_kg
+
+
+def _format_durable(entries: list[Entry]) -> str:
+    lines = []
+    for entry in entries:
+        line = f"- **{entry.title}** [{entry.entry_type.value}]"
+        if entry.content:
+            line += f": {entry.content}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _format_memory(entries: list[Entry]) -> str:
+    lines = []
+    for entry in entries:
+        memory = entry.metadata.custom.get("memory", {})
+        success = memory.get("success")
+        status = "success" if success is True else "failed" if success is False else "unchecked"
+        lines.append(f"- [{memory.get('session_id', 'default')}; {status}] {entry.content}")
+    return "\n".join(lines)
+
+
+def query_knowledge_graph(query: str, depth: int = 2, top_k: int = 15) -> str:
+    """Search durable Know-Do knowledge and frequently updated MemGraph entries."""
+    graph = _get_kg()
     try:
-        dt = datetime.fromisoformat(created_at_iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        days = (datetime.now(timezone.utc) - dt).days
-        return 1.0 / (1.0 + days)
-    except Exception:
-        return 0.5
+        durable = [
+            entry
+            for entry in graph.search(query, limit=top_k * 2, mode="hybrid")
+            if entry.entry_type != EntryType.memory
+        ][:top_k]
+        candidates = {entry.id: entry for entry in durable}
+        if depth > 0:
+            for seed in durable:
+                for related in graph.related(seed.id, depth=depth):
+                    candidates.setdefault(related.id, related)
+        durable = list(candidates.values())[:top_k]
+        for entry in durable:
+            increment_usage(graph, entry)
 
+        memory_entries = [
+            entry
+            for entry in graph.search(
+                query,
+                entry_type=EntryType.memory,
+                limit=top_k,
+                mode="hybrid",
+            )
+            if not entry.metadata.custom.get("memory", {}).get("promoted", False)
+        ]
+        for entry in memory_entries:
+            increment_usage(graph, entry)
 
-def _rank_score(node_data: dict) -> float:
-    rc    = node_data.get("reference_count", 0)
-    conf  = node_data.get("confidence", 1.0)
-    decay = _recency_decay(node_data.get("created_at", ""))
-    return (1 + rc) * conf * decay
-
-
-# ---------------------------------------------------------------------------
-# Formatting
-# ---------------------------------------------------------------------------
-
-_CAT_HINT = {
-    "skill": "*(use `load_skill` to load full instructions)*",
-    "memory": "*(past findings/lessons — read directly, do NOT use `load_skill`)*",
-}
-
-
-def _format_nodes(kg: KnowledgeGraph, node_ids: list[str]) -> str:
-    by_cat: dict[str, list[str]] = {}
-    for nid in node_ids:
-        node = kg.get_node(nid)
-        if not node:
-            continue
-        cat = node.category or "memory"
-        line = f"  - **{node.name}**"
-        if node.description:
-            line += f": {node.description}"
-        by_cat.setdefault(cat, []).append(line)
-
-    if not by_cat:
-        return "No relevant knowledge found."
-
-    sections = []
-    for cat in ("skill", "memory"):
-        if cat in by_cat:
-            hint = _CAT_HINT.get(cat, "")
-            sections.append(f"### {cat.capitalize()}\n{hint}\n" + "\n".join(by_cat[cat]))
-    return "\n\n".join(sections)
-
-
-def _format_nodes_multi(nodes: list[tuple[KnowledgeGraph, str]]) -> str:
-    """Format nodes fetched from potentially different graph instances."""
-    by_cat: dict[str, list[str]] = {}
-    for kg, nid in nodes:
-        node = kg.get_node(nid)
-        if not node:
-            continue
-        cat = node.category or "memory"
-        line = f"  - **{node.name}**"
-        if node.description:
-            line += f": {node.description}"
-        by_cat.setdefault(cat, []).append(line)
-
-    if not by_cat:
-        return "No relevant knowledge found."
-
-    sections = []
-    for cat in ("skill", "memory"):
-        if cat in by_cat:
-            hint = _CAT_HINT.get(cat, "")
-            sections.append(f"### {cat.capitalize()} nodes\n{hint}\n" + "\n".join(by_cat[cat]))
-    return "\n\n".join(sections)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def query_knowledge_graph(
-    query: str,
-    depth: int = 2,
-    top_k: int = 15,
-) -> str:
-    """Query the memory knowledge graph for lessons and past findings relevant to *query*.
-
-    Uses embedding-based semantic search to find seed nodes, then expands via BFS.
-    Falls back to substring matching if the embedding API is unavailable.
-
-    Call this at the start of planning to recall relevant past knowledge.
-    Memory nodes may reference skill names in their content to express skill associations.
-    To discover skills, use `search_skills` instead.
-
-    Args:
-        query: Free-text search string.
-        depth: BFS expansion depth from seed nodes (default 2).
-        top_k: Maximum number of nodes to return (default 15).
-
-    Returns:
-        Markdown-formatted list of matching memory nodes.
-    """
-    kg = _get_memory_kg()
-    try:
-        seed_ids = _find_seeds(kg, query, top_k=top_k)
-        if not seed_ids:
-            return f"No knowledge graph entries found for '{query}'."
-
-        G = kg.load_networkx()
-        visited: set[str] = set()
-        queue: deque[tuple[str, int]] = deque()
-        for sid in seed_ids:
-            if sid in G:
-                visited.add(sid)
-                queue.append((sid, 0))
-
-        while queue:
-            nid, d = queue.popleft()
-            if d >= depth:
-                continue
-            for neighbor in list(G.successors(nid)) + list(G.predecessors(nid)):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, d + 1))
-
-        ranked = sorted(
-            visited,
-            key=lambda nid: _rank_score(G.nodes[nid]),
-            reverse=True,
-        )[:top_k]
-
-        for nid in ranked:
-            kg.increment_reference(nid)
-
-        return _format_nodes(kg, ranked)
-
+        sections = []
+        if durable:
+            sections.append("### Know-Do Knowledge\n" + _format_durable(durable))
+        if memory_entries:
+            sections.append("### Working Memory\n" + _format_memory(memory_entries))
+        return "\n\n".join(sections) or f"No knowledge graph entries found for '{query}'."
     except Exception as exc:
         logger.warning("query_knowledge_graph failed: %s", exc)
         return f"Knowledge graph query failed: {exc}"
 
 
-def save_to_knowledge_graph(content: str, context: str = "") -> str:
-    """Save a plain-text lesson or finding as an Insight node.
-
-    Use this to persist an important finding during a session without waiting
-    for the post-session extractor. An embedding is computed immediately so the
-    node is searchable right away.
-
-    Args:
-        content: The lesson or fact to save (plain text, 1-3 sentences).
-        context: Optional context hint (e.g. current skill name or goal).
-
-    Returns:
-        Confirmation message with the created node name.
-    """
-    kg = _get_memory_kg()
+def save_to_knowledge_graph(
+    content: str,
+    context: str = "",
+    session_id: str = "default",
+    success: bool | None = None,
+) -> str:
+    """Write an observation to MemGraph for later validation and distillation."""
+    graph = _get_kg()
+    tags = ["matcreator-memory"]
+    if context:
+        tags.append(f"context:{context[:80]}")
     try:
-        name = content[:80].strip().rstrip(".")
-        node = kg.upsert_node(
-            category="memory",
-            name=name,
-            description=content,
-            content={"raw": content, "context": context},
+        memory = add_memory(
+            graph,
+            session_id,
+            content,
+            tags=tags,
+            success=success,
         )
-        vec = _embed_one(_node_text(node.name, content))
-        if vec:
-            kg.set_embedding(node.id, vec)
-        return f"Saved to knowledge graph as memory node: '{node.name}' (id={node.id})"
+        return f"Saved working memory (id={memory.id}, session={session_id})."
     except Exception as exc:
         logger.warning("save_to_knowledge_graph failed: %s", exc)
-        return f"Failed to save to knowledge graph: {exc}"
+        return f"Failed to save working memory: {exc}"
 
 
 def search_skills(query: str, top_k: int = 5) -> str:
-    """Search for skills semantically relevant to *query*.
-
-    Uses embedding-based semantic search to rank skill nodes by relevance.
-    Results are ordered by cosine similarity to the query — no recency bias.
-
-    Skill names are NOT available in the agent context — this is the only way
-    to discover them. Call this with a natural-language description of the task
-    or goal, not a skill name.
-
-    To explore the dependency graph from a skill you already know, use
-    `get_related_skills` instead.
-
-    Args:
-        query: Free-text description of the task or goal.
-        top_k: Number of results to return (default 5).
-
-    Returns:
-        Markdown list of matching skill names and descriptions, ranked by relevance.
-    """
+    """Search durable capabilities, procedures, workflows, and tools."""
     from ..config import get_disabled_skills
-    kg = _get_skill_kg()
+
+    graph = _get_kg()
+    disabled = set(get_disabled_skills())
+    allowed = {
+        EntryType.capability,
+        EntryType.procedure,
+        EntryType.workflow,
+        EntryType.tool,
+    }
     try:
-        node_ids = _find_seeds(kg, query, top_k=top_k, category="skill")
-        if not node_ids:
-            return f"No skills found for '{query}'."
-
-        disabled = set(get_disabled_skills())
-
-        for nid in node_ids:
-            kg.increment_reference(nid)
-
-        lines = []
-        for nid in node_ids:
-            node = kg.get_node(nid)
-            if not node or node.name in disabled:
-                continue
-            line = f"- **{node.name}**"
-            if node.description:
-                line += f": {node.description}"
-            lines.append(line)
-
-        return "\n".join(lines) if lines else f"No skills found for '{query}'."
-
+        results = [
+            entry
+            for entry in graph.search(query, limit=max(top_k * 3, 15), mode="hybrid")
+            if entry.entry_type in allowed
+            and "matcreator-skill" in entry.tags
+            and entry.title not in disabled
+        ][:top_k]
+        for entry in results:
+            increment_usage(graph, entry)
+        return _format_durable(results) if results else f"No skills found for '{query}'."
     except Exception as exc:
         logger.warning("search_skills failed: %s", exc)
         return f"Skill search failed: {exc}"
 
 
 def get_related_skills(start_node: str, top_k: int = 5, depth: int = 2) -> str:
-    """Traverse the skill dependency graph from a known skill node.
-
-    Starting from *start_node*, performs BFS over dependency edges to discover
-    related skills. Nodes closer to the start rank higher; reference count
-    breaks ties. No recency bias.
-
-    Use this after `search_skills` when you already know a skill name and want
-    to discover its dependencies or closely related workflows.
-
-    Args:
-        start_node: Name of a known skill node (exact, case-insensitive, or substring).
-        top_k:      Maximum number of related skills to return (default 5).
-        depth:      BFS depth limit (default 2).
-
-    Returns:
-        Markdown list of related skill names and descriptions, ranked by proximity.
-    """
-    kg = _get_skill_kg()
+    """Traverse durable Know-Do relationships from a known skill."""
+    graph = _get_kg()
     try:
-        start_id = _find_node_id_by_name(kg, start_node)
-        if start_id is None:
+        start = graph.get(start_node)
+        if start is None:
+            matches = graph.search(start_node, tags=["matcreator-skill"], limit=1)
+            start = matches[0] if matches else None
+        if start is None:
             return f"No skill node found matching '{start_node}'."
 
-        G = kg.load_networkx()
-        if start_id not in G:
-            return f"Skill '{start_node}' has no graph edges."
-
-        # BFS tracking hop distance; exclude the start node itself
-        visited: dict[str, int] = {}
-        queue: deque[tuple[str, int]] = deque([(start_id, 0)])
-        while queue:
-            nid, d = queue.popleft()
-            if nid in visited:
-                continue
-            visited[nid] = d
-            if d >= depth:
-                continue
-            for neighbor in list(G.successors(nid)) + list(G.predecessors(nid)):
-                if neighbor not in visited and G.nodes[neighbor].get("category") == "skill":
-                    queue.append((neighbor, d + 1))
-
-        neighbors = [(nid, hop) for nid, hop in visited.items() if nid != start_id]
-        neighbors.sort(key=lambda x: (x[1], -G.nodes[x[0]].get("reference_count", 0)))
-        top_ids = [nid for nid, _ in neighbors[:top_k]]
-
-        if not top_ids:
-            return f"No related skills found near '{start_node}'."
-
-        for nid in top_ids:
-            kg.increment_reference(nid)
-
-        from ..config import get_disabled_skills
-        disabled = set(get_disabled_skills())
-
-        lines = []
-        for nid in top_ids:
-            node = kg.get_node(nid)
-            if not node or node.name in disabled:
-                continue
-            line = f"- **{node.name}**"
-            if node.description:
-                line += f": {node.description}"
-            lines.append(line)
-
-        return "\n".join(lines) if lines else f"No related skills found near '{start_node}'."
-
+        related = [
+            entry
+            for entry in graph.related(start.id, depth=depth)
+            if "matcreator-skill" in entry.tags
+        ][:top_k]
+        for entry in related:
+            increment_usage(graph, entry)
+        return _format_durable(related) if related else f"No related skills found near '{start_node}'."
     except Exception as exc:
         logger.warning("get_related_skills failed: %s", exc)
         return f"Related skills lookup failed: {exc}"

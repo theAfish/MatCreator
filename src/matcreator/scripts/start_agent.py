@@ -390,32 +390,91 @@ def knowledge_related_skills(start_node, top_k, depth, workspace):
 @click.option("--workspace", default=None, metavar="DIR",
               help="Override the workspace root directory.")
 def knowledge_stats(workspace):
-    """Print node and edge counts for both skill and memory graphs."""
+    """Print durable Know-Do and writable MemGraph counts."""
     _setup_workspace(workspace)
     _ensure_path(PROJECT_ROOT)
-    from agents.MatCreator.knowledge.query import _get_skill_kg, _get_memory_kg
-    s = _get_skill_kg().stats()
-    m = _get_memory_kg().stats()
-    click.echo("Skill graph (dev-maintained):")
-    click.echo(f"  Nodes: {s['nodes']}  Edges: {s['edges']}")
-    for cat, count in s.get("by_category", {}).items():
-        click.echo(f"    {cat}: {count}")
-    click.echo("Memory graph (user-generated):")
-    click.echo(f"  Nodes: {m['nodes']}  Edges: {m['edges']}")
-    for cat, count in m.get("by_category", {}).items():
-        click.echo(f"    {cat}: {count}")
+    from agents.MatCreator.knowledge.kdg_memory import iter_memory
+    from agents.MatCreator.knowledge.query import _get_kg
+    graph = _get_kg()
+    stats = graph.stats()
+    memories = list(iter_memory(graph))
+    click.echo("Know-Do graph (all native nodes):")
+    click.echo(f"  Nodes: {stats['nodes']}  Edges: {stats['edges']}")
+    click.echo("MemGraph nodes:")
+    click.echo(
+        f"  Entries: {len(memories)}  "
+        f"Unpromoted: {sum(not entry.promoted for entry in memories)}"
+    )
 
 
 @knowledge_group.command("seed")
 @click.option("--workspace", default=None, metavar="DIR",
               help="Override the workspace root directory.")
 def knowledge_seed(workspace):
-    """Seed the knowledge graph with all SKILL.md and guide nodes."""
+    """Seed Know-Do Graph with all SKILL.md and guide entries."""
     _setup_workspace(workspace)
     _ensure_path(PROJECT_ROOT)
     from agents.MatCreator.skill import seed_skills_to_graph
     result = seed_skills_to_graph()
-    click.echo(f"Seeded {result['seeded']} nodes, {result['edges_created']} dependency edges created.")
+    click.echo(
+        f"Created {result['seeded']} entries and "
+        f"{result['edges_created']} dependency edges."
+    )
+
+
+@knowledge_group.command("migrate")
+@click.option("--workspace", default=None, metavar="DIR",
+              help="Override the workspace root directory.")
+@click.option("--memory-md", default=None, metavar="FILE",
+              help="Also import a legacy MEMORY.md file.")
+def knowledge_migrate(workspace, memory_md):
+    """Migrate legacy skill, memory, and optional MEMORY.md data."""
+    _setup_workspace(workspace)
+    _ensure_path(PROJECT_ROOT)
+    from agents.MatCreator.constants import KNOW_DO_GRAPH_DB
+    from agents.MatCreator.knowledge.kdg_memory import iter_memory
+    from agents.MatCreator.knowledge.migrate import migrate_memory_md
+    from agents.MatCreator.knowledge.query import _get_kg, get_migration_result
+
+    result = get_migration_result()
+    click.echo(
+        "Newly migrated from legacy sources: "
+        f"{result.get('know_do_nodes', 0)} durable entries, "
+        f"{result.get('memory_entries', 0)} memories, "
+        f"{result.get('edges', 0)} edges."
+    )
+    if memory_md:
+        md_result = migrate_memory_md(memory_md)
+        click.echo(md_result["message"])
+
+    graph = _get_kg()
+    stats = graph.stats()
+    memory_count = sum(1 for _ in iter_memory(graph))
+    click.echo(f"Database: {KNOW_DO_GRAPH_DB}")
+    click.echo(
+        f"Current graph: {stats['nodes']} entries "
+        f"({memory_count} memories), {stats['edges']} edges."
+    )
+
+
+@knowledge_group.command("distill")
+@click.option("--min-evidence", default=3, show_default=True, type=int,
+              help="Minimum similar memories required for promotion.")
+@click.option("--stale-days", default=30, show_default=True, type=int,
+              help="Age threshold for pruning unsuccessful memory.")
+@click.option("--workspace", default=None, metavar="DIR",
+              help="Override the workspace root directory.")
+def knowledge_distill(min_evidence, stale_days, workspace):
+    """Promote repeated successful memory into durable Know-Do entries."""
+    _setup_workspace(workspace)
+    _ensure_path(PROJECT_ROOT)
+    from agents.MatCreator.knowledge.synthesizer import run_knowledge_synthesizer
+
+    result = run_knowledge_synthesizer(
+        stale_days=stale_days,
+        min_insights_for_workflow=min_evidence,
+    )
+    click.echo(result["message"])
 
 
 if __name__ == "__main__":

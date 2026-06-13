@@ -1,266 +1,226 @@
-# Knowledge Graph Memory System
+# Know-Do Graph Migration Guide
 
-## Motivation
+MatCreator now uses the unified Know-Do Graph data model. Durable knowledge and
+working memory are stored together in:
 
-The original memory system used a single flat `MEMORY.md` file that grew unboundedly through append-only writes. This caused three compounding problems:
-
-1. **Context window overflow** — the entire file was injected into every planning prompt regardless of relevance.
-2. **Knowledge staleness and duplication** — no deduplication, no pruning, and no expiry of outdated entries.
-3. **No skill-knowledge linkage** — lessons learned were disconnected from the skills and workflows they applied to.
-
-The knowledge graph replaces this with a structured, self-evolving property graph backed by SQLite, with targeted BFS-based retrieval replacing full-file injection.
-
----
-
-## Storage and Persistence
-
-The graph is stored in a SQLite database at:
-
-```
-agents/MatCreator/.adk/knowledge_graph.db
+```text
+agents/MatCreator/.adk/know_do_graph.db
 ```
 
-This places it alongside the ADK session database (`session.db`) in the `.adk` directory, which is anchored to the agent package path (`_AGENT_PATH / ".adk"`), not the user-facing workspace. The `.adk` directory is outside the workspace root and therefore not reachable by the `run_bash` or `run_python` tools available to the agent during task execution.
+Working memories are normal `EntryType.memory` rows in the shared `entries`
+table. Memory relationships, skill links, and promotion links are normal rows
+in the shared `edges` table. New memory is not stored as JSON.
 
-The database is created automatically on first use. It persists across server restarts. NetworkX is used as an in-memory traversal layer only — it is loaded from SQLite at query time and discarded afterward; it is not the source of truth.
+Run all commands in this guide from the MatCreator project root.
 
-Cross-session pipeline state (execution completion counter, last synthesizer run timestamp) is stored alongside the database at:
+## What Is Migrated
 
-```
-agents/MatCreator/.adk/.kg_state.json
-```
+| Previous source | New representation |
+|---|---|
+| `.adk/know_do_graph.db` | Entries and edges stored in the unified default database |
+| `.adk/skill_graph.db` | Skills become capability entries; dependency edges are preserved |
+| `.adk/memory_graph.db` | Memories become native `EntryType.memory` nodes |
+| `.adk/memory/*.json` | Imported once as native memory nodes |
+| `MEMORY.md` | Each usable line becomes a native memory node |
 
----
+Legacy files are read-only migration sources. MatCreator does not delete them.
+Migration is idempotent, so running it again does not duplicate previously
+imported records.
 
-## Data Model
+## 1. Update Dependencies
 
-### Node types
+The unified memory implementation requires the updated Know-Do Graph release:
 
-| Type | Meaning | Primary source |
-|------|---------|---------------|
-| `Concept` | Abstract domain knowledge (e.g. "VASP k-point convergence") | Extractor |
-| `Skill` | Pointer to a `SKILL.md` procedural workflow | Extractor |
-| `Material` | Material entity (e.g. "BaTiO3", "Si diamond") | Extractor / trajectory |
-| `Result` | Quantitative finding (energy, accuracy, convergence value) | Extractor / trajectory |
-| `Insight` | Heuristic or lesson valid across future sessions | Extractor / `save_to_knowledge_graph` / migration |
-| `Workflow` | Multi-step procedure abstracted from repeated Insight clusters | Synthesizer |
-
-### Edge types
-
-| Type | Meaning |
-|------|---------|
-| `requires` | A Workflow or Skill depends on a Concept |
-| `produces` | A Workflow or Skill yields a Result |
-| `tested_on` | A Result was obtained for a specific Material |
-| `specializes` | A Concept is a sub-type of a parent Concept |
-| `similar_to` | Two nodes are near-duplicates (used by the Synthesizer before merging) |
-| `discovered_in` | An Insight was learned while using a Skill or Workflow |
-| `supersedes` | A newer Insight replaces an older one |
-
-### SQLite schema
-
-```sql
-kg_nodes (
-  id              TEXT PRIMARY KEY,   -- UUID
-  type            TEXT NOT NULL,      -- node type enum
-  name            TEXT NOT NULL,      -- canonical display name
-  description     TEXT,
-  content         JSON,               -- type-specific payload
-  source_session  TEXT,               -- ADK session_id where extracted
-  created_at      TEXT NOT NULL,
-  updated_at      TEXT NOT NULL,
-  reference_count INTEGER DEFAULT 0,  -- incremented on each retrieval
-  confidence      REAL    DEFAULT 1.0 -- LLM extraction confidence 0–1
-)
-
-kg_edges (
-  id         TEXT PRIMARY KEY,
-  source_id  TEXT REFERENCES kg_nodes(id) ON DELETE CASCADE,
-  target_id  TEXT REFERENCES kg_nodes(id) ON DELETE CASCADE,
-  edge_type  TEXT NOT NULL,
-  weight     REAL DEFAULT 1.0,        -- incremented when same edge re-extracted
-  properties JSON,
-  created_at TEXT NOT NULL
-)
+```bash
+uv sync
 ```
 
----
+For a development checkout, install the current Know-Do Graph source into the
+MatCreator environment:
 
-## System Components
-
-### 1. `graph_store.py` — KnowledgeGraph
-
-Core CRUD layer. Key behaviours:
-
-**Fuzzy deduplication on upsert.** Before inserting a new node, `upsert_node` checks all existing nodes of the same type for name similarity using `difflib.SequenceMatcher`. If the ratio exceeds `similarity_threshold` (default 0.85), the existing node is returned and its description is updated if the new one is longer. This prevents the same concept from accumulating under slightly different names.
-
-**Edge weight accumulation.** `upsert_edge` increments the `weight` field if the same (source, target, edge_type) triple already exists, rather than creating a duplicate edge. Frequently re-observed relationships therefore carry higher weight.
-
-**NetworkX loader.** `load_networkx()` materialises the entire graph as a `nx.DiGraph` for in-memory BFS traversal. Called only at query time.
-
----
-
-### 2. `query.py` — Retrieval
-
-**`query_knowledge_graph(query, types, depth, top_k)`**
-
-Called by the thinking agent at the start of planning. Returns structured Markdown grouped by node type. Algorithm:
-
-1. Fuzzy name search via SQLite `LIKE '%query%'` → seed nodes.
-2. Load full graph into NetworkX.
-3. BFS from all seed nodes (bidirectional — follows both outgoing and incoming edges) up to `depth` hops.
-4. Optionally filter by `types`.
-5. Rank collected nodes by: `(1 + reference_count) × confidence × recency_decay`, where `recency_decay = 1 / (1 + days_old)`. Newer, more-referenced, high-confidence nodes rank first.
-6. Return top `top_k` nodes. Increment `reference_count` for each returned node (hot-path signal for the synthesizer).
-
-**`save_to_knowledge_graph(content, context)`**
-
-Lets the thinking agent immediately persist an Insight during a session without waiting for the post-session extractor. The first 80 characters of `content` become the node name; deduplication still applies.
-
----
-
-### 3. `extractor.py` — KnowledgeExtractor
-
-Triggered automatically by the orchestrator after every successful execution phase. Reads two sources for a given `session_id`:
-
-**Source A — per-step trajectory** (`trajectories/{session_id}.jsonl`): each line contains `step_index`, `active_skill`, `key_results`, `concise_summary`. This captures *what was done* and quantitative results.
-
-**Source B — session-level summary** (`trajectories/{session_id}_summary.json`): written by the thinking agent via `write_session_summary` after execution returns to the planner. Schema:
-
-```json
-{
-  "goal":            "Original user goal in their words",
-  "approach":        "Overall approach and why it was chosen",
-  "outcome":         "One-sentence statement of what was accomplished",
-  "key_decisions":   ["decision 1", "decision 2"],
-  "lessons_learned": ["heuristic 1", "heuristic 2"],
-  "failed_attempts": ["tried X, failed because Y"]
-}
+```bash
+uv pip install --python .venv/bin/python \
+  -e /path/to/know-do-graph
 ```
 
-This captures the *why*: planning rationale, key decisions, and failures that step-level entries miss.
+Confirm that `KnowDoGraph.memory()` uses database-backed memory:
 
-Both sources are combined into a single LLM prompt. The LLM returns a JSON array of `{type, name, description, relations}` objects. The extractor then:
-
-1. **Pass 1 — nodes**: upsert each entity (deduplication via `graph_store`).
-2. **Pass 2 — edges**: upsert each declared relation (both endpoints must be present in the current batch).
-
-Gracefully handles missing trajectory (skips) and missing session summary (falls back to a placeholder string).
-
----
-
-### 4. `synthesizer.py` — KnowledgeSynthesizer
-
-Runs every 10 completed executions (counted persistently across sessions in `.kg_state.json`). Executes three passes in order:
-
-**Pass 1 — Prune stale nodes.** Deletes nodes where `reference_count ≤ stale_min_refs` (default 0) AND age ≥ `stale_days` (default 30 days). Implements a "use-it-or-lose-it" decay: knowledge that has never been retrieved and is older than a month is removed.
-
-**Pass 2 — Merge similar_to clusters.** Finds all connected components in the subgraph of `similar_to` edges using union-find. Within each cluster, the node with the highest `reference_count` is designated canonical. All incoming and outgoing edges of non-canonical nodes are redirected to the canonical node, and the non-canonical nodes are deleted. Reference counts are summed.
-
-**Pass 3 — Abstract Workflow nodes.** Groups Insight nodes by the Skill or Workflow they point to via `discovered_in` edges. When a Skill has accumulated ≥ `min_insights_for_workflow` (default 3) Insights, a new `Workflow` abstraction node is synthesised above them (e.g. `"Workflow: VASP single-point"`). The new node links back to all contributing Insights. This is how higher-level procedural knowledge emerges from accumulated experience.
-
----
-
-### 5. `migrate.py` — One-time migration
-
-Reads the existing `MEMORY.md`, converts each non-empty bullet line into an `Insight` node, and upserts it into the graph. Deduplication applies, so re-running is safe. The original `MEMORY.md` is kept as a read-only archive; no new writes go to it.
-
----
-
-### 6. `kg_state.py` — Persistent pipeline state
-
-Reads and writes `agents/MatCreator/.adk/.kg_state.json`. Tracks:
-
-- `exec_completion_count` — global counter incremented by the orchestrator after every successful execution phase. Persists across server restarts so the synthesizer fires every 10 real executions, not every 10 within a single session.
-- `last_synthesizer_run` — ISO-8601 timestamp of the most recent synthesizer invocation.
-
----
-
-## Integration with the Agent System
-
-### Thinking agent (`thinking_agent/agent.py`)
-
-Two new tools replace `read_memory` / `update_memory` as the primary memory interface:
-
-| Tool | When to call |
-|------|-------------|
-| `query_knowledge_graph(query, ...)` | At the start of planning, before drafting a plan |
-| `save_to_knowledge_graph(content, context)` | Immediately after a significant finding, within the same session |
-| `write_session_summary(summary)` | Once per session, after execution completes and results are available |
-
-`read_memory` and `update_memory` are retained as fallbacks for manual use and backward compatibility, but are no longer called by default.
-
-### Orchestrator (`orchestrator/agent.py`)
-
-After every successful execution phase, the orchestrator calls:
-
-```python
-run_knowledge_extractor(ctx.session.id)   # always
-run_knowledge_synthesizer()               # every 10th execution (cross-session)
+```bash
+.venv/bin/python -c \
+  "import know_do_graph; print(know_do_graph.__version__, know_do_graph.__file__)"
 ```
 
-Both calls are wrapped in a `try/except` so a failure in the knowledge pipeline never interrupts the main agent loop.
+## 2. Stop Running Services
 
----
+Stop the MatCreator agent, API server, and any process writing to the old graph.
+This prevents writes during backup and migration.
 
-## Data Flow Diagram
+## 3. Back Up Existing Data
 
-```
-User request
-     │
-     ▼
- Thinking agent
-  ├── query_knowledge_graph(goal)    → reads kg_nodes / NetworkX BFS
-  ├── drafts plan
-  └── confirm_plan_and_start_execution
-     │
-     ▼
- Execution agent
-  └── runs steps → writes trajectories/{session_id}.jsonl (per step)
-     │
-     ▼
- Thinking agent (back in planner after execution)
-  └── write_session_summary(...)    → writes trajectories/{session_id}_summary.json
-     │
-     ▼
- Orchestrator post-execution hook
-  ├── KnowledgeExtractor
-  │    ├── reads .jsonl  (what was done, results)
-  │    ├── reads _summary.json  (why, decisions, failures)
-  │    ├── calls LLM → JSON array of {type, name, description, relations}
-  │    └── upserts nodes + edges into knowledge_graph.db
-  │
-  └── KnowledgeSynthesizer (every 10 executions, cross-session)
-       ├── Pass 1: prune stale unreferenced nodes
-       ├── Pass 2: merge similar_to clusters (union-find → canonical node)
-       └── Pass 3: abstract Workflow nodes from Insight clusters
+Create a timestamped backup before migrating:
+
+```bash
+backup_dir="backup/knowledge-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir/legacy-adk" "$backup_dir/current-data"
+
+cp -a agents/MatCreator/.adk/skill_graph.db "$backup_dir/legacy-adk/" 2>/dev/null || true
+cp -a agents/MatCreator/.adk/memory_graph.db "$backup_dir/legacy-adk/" 2>/dev/null || true
+cp -a agents/MatCreator/.adk/know_do_graph.db "$backup_dir/legacy-adk/" 2>/dev/null || true
+cp -a agents/MatCreator/.adk/memory "$backup_dir/legacy-adk/" 2>/dev/null || true
+cp -a agents/MatCreator/.adk/know_do_graph.db "$backup_dir/current-data/" 2>/dev/null || true
 ```
 
----
+Back up a workspace `MEMORY.md` separately if one exists.
 
-## File Reference
+## 4. Run Migration
 
+Migrate all detected legacy databases:
+
+```bash
+matcreator knowledge migrate
 ```
-agents/MatCreator/knowledge/
-  __init__.py          public API
-  schema.py            SQLAlchemy ORM: KgNode, KgEdge
-  graph_store.py       CRUD + fuzzy dedup + NetworkX loader
-  query.py             query_knowledge_graph, save_to_knowledge_graph
-  extractor.py         KnowledgeExtractor (post-session, LLM-based)
-  synthesizer.py       KnowledgeSynthesizer (prune / merge / abstract)
-  migrate.py           one-time MEMORY.md → graph migration
-  kg_state.py          persistent cross-session pipeline counters
 
-agents/MatCreator/agents/thinking_agent/
-  memory.py            re-exports graph tools; keeps legacy read/update_memory
-  session_summary.py   write_session_summary tool + SessionSummary schema
+To also import a specific `MEMORY.md`:
 
-agents/MatCreator/.adk/
-  session.db                       ADK session store (managed by ADK)
-  knowledge_graph.db               SQLite graph database
-  .kg_state.json                   cross-session pipeline counters
-
-{WORKSPACE_ROOT}/trajectories/
-  {session_id}.jsonl               per-step execution log (input to extractor)
-  {session_id}_summary.json        session-level narrative (input to extractor)
+```bash
+matcreator knowledge migrate --memory-md /absolute/path/to/MEMORY.md
 ```
+
+Migration also runs automatically the first time MatCreator opens the unified
+graph. The explicit command is recommended because it prints the number of
+durable entries, memory nodes, and edges imported.
+
+After migration, seed the current skills and guides:
+
+```bash
+matcreator knowledge seed
+```
+
+Seeding is also idempotent. Existing usage counts and relationships are
+preserved.
+
+## 5. Verify The Result
+
+Check MatCreator's combined statistics:
+
+```bash
+matcreator knowledge stats
+```
+
+Check the same database through the Know-Do Graph CLI:
+
+```bash
+know-do-graph graph stats
+```
+
+Both commands should use the same `KDG_DB_PATH`. By default MatCreator points
+that at `agents/MatCreator/.adk/know_do_graph.db`, so the CLI and agent share
+the same database.
+
+Inspect native SQLite counts:
+
+```bash
+sqlite3 agents/MatCreator/.adk/know_do_graph.db \
+  "SELECT entry_type, COUNT(*) FROM entries GROUP BY entry_type ORDER BY entry_type;"
+
+sqlite3 agents/MatCreator/.adk/know_do_graph.db \
+  "SELECT relation, COUNT(*) FROM edges GROUP BY relation ORDER BY relation;"
+```
+
+Memory nodes should appear under `entry_type = memory`. To inspect a known
+session:
+
+```bash
+know-do-graph mem list --session SESSION_ID
+```
+
+Verify that no new JSON file is created after a fresh agent run. Existing JSON
+files may remain as migration backups, but new writes must increase the
+`memory` row count in SQLite.
+
+## 6. Distill Working Memory
+
+Agent observations remain memory nodes until repeated evidence is promoted:
+
+```bash
+matcreator knowledge distill --min-evidence 3
+```
+
+Distillation:
+
+1. Finds similar, unpromoted memory nodes.
+2. Requires repeated successful or cross-session evidence.
+3. Creates or updates a durable heuristic entry.
+4. Adds `related_memory`, `memory_of`, `heuristic_for`, and `refinement_of`
+   edges where applicable.
+5. Marks source memory nodes as promoted without deleting them.
+
+Use a different threshold when needed:
+
+```bash
+matcreator knowledge distill --min-evidence 5 --stale-days 60
+```
+
+## Rollback
+
+Stop all graph writers before rollback.
+
+Restore the backed-up unified database:
+
+```bash
+cp backup/knowledge-TIMESTAMP/current-data/know_do_graph.db \
+  agents/MatCreator/.adk/know_do_graph.db
+```
+
+If no unified database existed before migration, move the new database aside:
+
+```bash
+mv agents/MatCreator/.adk/know_do_graph.db \
+  agents/MatCreator/.adk/know_do_graph.db.migrated
+```
+
+The original `.adk/skill_graph.db`, `.adk/memory_graph.db`, `.adk/memory/`,
+and `MEMORY.md` sources remain untouched and can be used to repeat migration.
+
+## Troubleshooting
+
+### `know-do-graph graph stats` reports zero nodes
+
+Run the command with the same `KDG_DB_PATH` MatCreator uses. By default that is
+the database in the MatCreator ADK directory:
+
+```bash
+pwd
+echo "$KDG_DB_PATH"
+ls -l agents/MatCreator/.adk/know_do_graph.db
+know-do-graph graph stats
+```
+
+### Agent memory appears in JSON
+
+The environment is using an older Know-Do Graph package. Check:
+
+```bash
+.venv/bin/python -c \
+  "import know_do_graph; print(know_do_graph.__version__, know_do_graph.__file__)"
+```
+
+Update the dependency, restart the agent, and rerun migration. In the unified
+implementation, `graph.get(memory_id).entry_type` is `memory`, and no new
+session JSON file is written.
+
+### Counts increase after rerunning migration
+
+Ensure all commands use the same project root and database. Then inspect tags
+such as `legacy-id:*`, `legacy-kdg-id:*`, and `migrated-memory-id:*`, which are
+used as idempotency markers.
+
+## Runtime Behavior
+
+- Skills are durable capability entries.
+- Guides are durable procedure entries.
+- Agent saves are native memory nodes.
+- Extracted memory-to-memory relationships use `related_memory`.
+- Memory linked to a durable skill uses `memory_of`.
+- Promoted memory links to refined knowledge with `refinement_of`.
+- Retrieval searches durable entries and unpromoted memory in the same graph.

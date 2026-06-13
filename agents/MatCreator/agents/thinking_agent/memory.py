@@ -7,6 +7,7 @@ Exposes knowledge-graph-based tools (preferred) and legacy MEMORY.md helpers
 from __future__ import annotations
 
 import os
+from google.adk.tools import ToolContext
 from ...workspace import WORKSPACE_ROOT
 
 _MEMORY_PATH = WORKSPACE_ROOT / "MEMORY.md"
@@ -18,7 +19,7 @@ _MEMORY_PATH = WORKSPACE_ROOT / "MEMORY.md"
 
 from ...knowledge.query import (
     query_knowledge_graph as _query_knowledge_graph,
-    save_to_knowledge_graph,
+    save_to_knowledge_graph as _save_to_knowledge_graph,
     search_skills,
     get_related_skills,
 )
@@ -44,17 +45,35 @@ def query_knowledge_graph(
     return _query_knowledge_graph(query, depth=depth, top_k=top_k)
 
 
+def save_to_knowledge_graph(
+    content: str,
+    tool_context: ToolContext,
+    context: str = "",
+) -> str:
+    """Save a finding to the current session's writable MemGraph.
+
+    Args:
+        content: The observation, lesson, warning, or result to remember.
+        context: Short task or skill context for later retrieval.
+    """
+    session_id = tool_context.state.get("session_id", "default")
+    return _save_to_knowledge_graph(
+        content,
+        context=context,
+        session_id=session_id,
+    )
+
+
 def run_synthesizer(
     stale_days: int = 30,
     stale_min_refs: int = 0,
     min_insights_for_workflow: int = 3,
 ) -> dict:
-    """Prune, merge, and abstract the knowledge graph on demand.
+    """Distill repeated successful memory into durable Know-Do knowledge.
 
-    Runs three passes: prune stale nodes, merge near-duplicates, and abstract
-    recurring patterns into Workflow nodes. Use when the knowledge graph may
-    have accumulated many redundant or stale nodes, or after a long session
-    with many saves.
+    Similar observations from successful executions are promoted after enough
+    evidence, linked to their source capabilities, and marked as promoted in
+    MemGraph. Stale failed or unchecked observations are pruned.
 
     Args:
         stale_days: Delete nodes older than this many days with few references.

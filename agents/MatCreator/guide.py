@@ -56,28 +56,38 @@ ALL_GUIDES = load_guides()
 
 
 def seed_guides_to_graph() -> dict:
-    """Upsert all guides as skill nodes in the knowledge graph.
+    """Upsert all guides as Know-Do procedures.
 
     Each node stores only name + description (from guide frontmatter).
     Full guide content is loaded via `load_guide`. Existing nodes are
     not overwritten; reference_count and edges are preserved.
     """
-    from .knowledge.query import _get_kg, _embed_one, _node_text
+    from know_do_graph import (
+        EntryMetadata,
+        EntryType,
+        RefinementStatus,
+        VerificationStatus,
+    )
+    from .knowledge.kdg_memory import upsert_entry
+    from .knowledge.query import _get_kg
 
     kg = _get_kg()
     seeded = 0
     for guide in ALL_GUIDES:
-        node = kg.upsert_node(
-            category="skill",
-            name=guide.name,
-            description=guide.description or "",
+        _, created = upsert_entry(
+            kg,
+            title=guide.name,
+            content=guide.description or "",
+            entry_type=EntryType.procedure,
+            tags=["matcreator-skill", "matcreator-guide", "managed"],
+            metadata=EntryMetadata(
+                source_provenance="guide",
+                refinement_status=RefinementStatus.validated,
+                verification_status=VerificationStatus.peer_reviewed,
+                custom={"managed_by": "matcreator", "kind": "guide"},
+            ),
         )
-        if node.embedding is None:
-            vec = _embed_one(_node_text(node.name, node.description or ""))
-            if vec:
-                kg.set_embedding(node.id, vec)
-        seeded += 1
+        seeded += int(created)
     return {"status": "ok", "seeded": seeded}
-
 
 

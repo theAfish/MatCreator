@@ -1,17 +1,36 @@
-"""Knowledge synthesizer: prune stale nodes, merge near-duplicates, and abstract patterns."""
+"""Distill repeated MemGraph observations into durable Know-Do entries."""
 
 from __future__ import annotations
 
+import difflib
 import logging
-import uuid
+import re
 from datetime import datetime, timezone
-from sqlalchemy import select
 
-from .graph_store import KnowledgeGraph  # noqa: F401 (kept for type hints)
-from .query import _get_memory_kg
-from .schema import KgNode, KgEdge
+from know_do_graph import EdgeRelation
+
+from .kdg_memory import connect_once, iter_memory, promote_memory
+from .query import _get_kg
 
 logger = logging.getLogger(__name__)
+
+
+def _normalized(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9_.+-]+", text.casefold()))
+
+
+def _clusters(memories, threshold: float = 0.72):
+    clusters: list[list] = []
+    for memory in memories:
+        normalized = _normalized(memory.content)
+        for cluster in clusters:
+            representative = _normalized(cluster[0].content)
+            if difflib.SequenceMatcher(None, normalized, representative).ratio() >= threshold:
+                cluster.append(memory)
+                break
+        else:
+            clusters.append([memory])
+    return clusters
 
 
 def run_knowledge_synthesizer(
@@ -19,187 +38,89 @@ def run_knowledge_synthesizer(
     stale_min_refs: int = 0,
     min_insights_for_workflow: int = 3,
 ) -> dict:
-    """Prune, merge, and abstract the knowledge graph.
+    """Promote repeated successful memory and prune stale failed/unchecked notes.
 
-    Runs three passes:
-    1. Prune: delete nodes older than *stale_days* with ≤ *stale_min_refs* references.
-    2. Merge: collapse nodes linked by `similar_to` edges into the most-referenced one.
-    3. Abstract: when ≥ *min_insights_for_workflow* Insight nodes share a `discovered_in`
-       Skill/Workflow, synthesize a new Workflow abstraction node above them.
-
-    Returns:
-        Dict with keys: pruned, merged, abstracted, message.
+    ``min_insights_for_workflow`` is retained for API compatibility and now
+    controls the minimum evidence count required for promotion.
     """
-    kg = _get_memory_kg()
-    stats = {"pruned": 0, "merged": 0, "abstracted": 0}
+    del stale_min_refs
+    graph = _get_kg()
+    unpromoted = list(iter_memory(graph, include_promoted=False))
+    eligible = [entry for entry in unpromoted if entry.success is not False]
 
-    # ------------------------------------------------------------------
-    # Pass 1: Prune stale memory nodes (skill nodes are never pruned)
-    # ------------------------------------------------------------------
-    now = datetime.now(timezone.utc)
-    with kg._Session() as sess:
-        stale_candidates = sess.execute(
-            select(KgNode).where(
-                KgNode.reference_count <= stale_min_refs,
-                KgNode.category == "memory",
-            )
-        ).scalars().all()
+    promoted = 0
+    linked = 0
+    for cluster in _clusters(eligible):
+        sessions = {entry.session_id for entry in cluster}
+        successful = [entry for entry in cluster if entry.success is True]
+        if len(cluster) < min_insights_for_workflow:
+            continue
+        if len(successful) < 2 and len(sessions) < 2:
+            continue
 
-        to_delete: list[str] = []
-        for node in stale_candidates:
-            if node.created_at:
-                age_days = (now - node.created_at.replace(tzinfo=timezone.utc)).days
-                if age_days >= stale_days:
-                    to_delete.append(node.id)
+        canonical = max(cluster, key=lambda entry: len(entry.content))
+        title = canonical.content.split(":", 1)[0].strip()[:80].rstrip(".")
+        durable, created = promote_memory(
+            graph,
+            canonical,
+            title=title,
+            content=canonical.content,
+        )
+        promoted += int(created)
 
-        for nid in to_delete:
-            n = sess.get(KgNode, nid)
-            if n:
-                sess.delete(n)
-        sess.commit()
-        stats["pruned"] = len(to_delete)
-
-    # ------------------------------------------------------------------
-    # Pass 2: Merge relates_to clusters among memory nodes
-    # ------------------------------------------------------------------
-    with kg._Session() as sess:
-        similar_edges = sess.execute(
-            select(KgEdge).where(KgEdge.edge_type == "relates_to")
-        ).scalars().all()
-
-        # Build adjacency for union-find
-        parent: dict[str, str] = {}
-
-        def find(x: str) -> str:
-            while parent.get(x, x) != x:
-                parent[x] = parent.get(parent.get(x, x), x)
-                x = parent[x]
-            return x
-
-        def union(a: str, b: str) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
-
-        for edge in similar_edges:
-            union(edge.source_id, edge.target_id)
-
-        # Find clusters (groups with >1 member)
-        clusters: dict[str, list[str]] = {}
-        all_ids = set()
-        for edge in similar_edges:
-            all_ids.update([edge.source_id, edge.target_id])
-        for nid in all_ids:
-            root = find(nid)
-            clusters.setdefault(root, []).append(nid)
-
-        merged_count = 0
-        for root, members in clusters.items():
-            if len(members) <= 1:
-                continue
-            # Only merge if all members are memory nodes
-            nodes = [sess.get(KgNode, m) for m in members if sess.get(KgNode, m)]
-            nodes = [n for n in nodes if n and n.category == "memory"]
-            if len(nodes) <= 1:
-                continue
-            canonical = max(nodes, key=lambda n: n.reference_count)
-            for node in nodes:
-                if node.id == canonical.id:
-                    continue
-                # Redirect all edges from/to this node to canonical
-                for e in list(sess.execute(
-                    select(KgEdge).where(KgEdge.source_id == node.id)
-                ).scalars()):
-                    e.source_id = canonical.id
-                for e in list(sess.execute(
-                    select(KgEdge).where(KgEdge.target_id == node.id)
-                ).scalars()):
-                    e.target_id = canonical.id
-                canonical.reference_count += node.reference_count
-                sess.delete(node)
-                merged_count += 1
-        sess.commit()
-        stats["merged"] = merged_count
-
-    # ------------------------------------------------------------------
-    # Pass 3: Abstract memory clusters into skill concept nodes
-    # When ≥ min_insights_for_workflow memory nodes all relate_to the same
-    # skill node, synthesize a new "concept" skill node above them.
-    # NOTE: With the split graph architecture (skill_graph.db / memory_graph.db),
-    # cross-graph relates_to edges no longer exist, so this pass is currently a
-    # no-op. TODO: replace with embedding-based cross-graph abstraction.
-    # ------------------------------------------------------------------
-    with kg._Session() as sess:
-        relates_edges = sess.execute(
-            select(KgEdge).where(KgEdge.edge_type == "relates_to")
-        ).scalars().all()
-
-        # Group memory nodes by the skill node they relate to
-        skill_to_memories: dict[str, list[str]] = {}
-        for edge in relates_edges:
-            src = sess.get(KgNode, edge.source_id)
-            tgt = sess.get(KgNode, edge.target_id)
-            if src and tgt and src.category == "memory" and tgt.category == "skill":
-                skill_to_memories.setdefault(edge.target_id, []).append(edge.source_id)
-
-        abstracted_count = 0
-        for skill_id, memory_ids in skill_to_memories.items():
-            if len(memory_ids) < min_insights_for_workflow:
-                continue
-            skill_node = sess.get(KgNode, skill_id)
-            if not skill_node:
-                continue
-            # Check if a synthesized concept node already exists for this skill
-            concept_name = f"Concept: {skill_node.name}"
-            existing = sess.execute(
-                select(KgNode).where(
-                    KgNode.category == "skill",
-                    KgNode.name == concept_name,
+        for memory in cluster:
+            if memory.id != canonical.id:
+                connect_once(
+                    graph,
+                    memory.id,
+                    canonical.id,
+                    relation=EdgeRelation.related_memory,
+                    metadata={"source": "matcreator-distillation-cluster"},
                 )
-            ).scalars().first()
-            if existing:
-                continue
+                graph.memory(memory.session_id).mark_promoted(memory.id, durable.id)
 
-            concept = KgNode(
-                id=str(uuid.uuid4()),
-                category="skill",
-                type="skill",
-                name=concept_name,
-                description=(
-                    f"Synthesized concept from {len(memory_ids)} memory nodes "
-                    f"accumulated around '{skill_node.name}'."
-                ),
-                source_session="synthesizer",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-                reference_count=0,
-                confidence=0.8,
+        source_ids = {
+            source_id
+            for memory in cluster
+            for source_id in memory.source_entry_ids
+            if graph.get(source_id) is not None
+        }
+        for source_id in source_ids:
+            linked += int(
+                connect_once(
+                    graph,
+                    durable.id,
+                    source_id,
+                    relation=EdgeRelation.heuristic_for,
+                )
             )
-            sess.add(concept)
-            sess.flush()
 
-            # Link skill node → concept via belongs_to
-            edge = KgEdge(
-                id=str(uuid.uuid4()),
-                source_id=skill_id,
-                target_id=concept.id,
-                edge_type="belongs_to",
-                weight=1.0,
-                created_at=datetime.now(timezone.utc),
-            )
-            sess.add(edge)
-            abstracted_count += 1
-        sess.commit()
-        stats["abstracted"] = abstracted_count
+    cutoff = datetime.now(timezone.utc)
+    pruned = 0
+    for memory in unpromoted:
+        created_at = memory.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_days = (cutoff - created_at).days
+        if age_days >= stale_days and memory.success is not True:
+            if graph.memory(memory.session_id).delete(memory.id):
+                pruned += 1
 
+    graph.refresh()
     logger.info(
-        "Synthesizer: pruned=%d merged=%d abstracted=%d",
-        stats["pruned"], stats["merged"], stats["abstracted"],
+        "Know-Do distillation: promoted=%d linked=%d pruned=%d",
+        promoted,
+        linked,
+        pruned,
     )
     return {
-        **stats,
+        "pruned": pruned,
+        "merged": 0,
+        "abstracted": promoted,
+        "promoted": promoted,
+        "linked": linked,
         "message": (
-            f"Synthesizer complete: pruned {stats['pruned']}, "
-            f"merged {stats['merged']}, abstracted {stats['abstracted']}."
+            f"Know-Do distillation complete: promoted {promoted}, "
+            f"linked {linked}, pruned {pruned}."
         ),
     }
