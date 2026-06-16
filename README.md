@@ -108,7 +108,6 @@ GRAPH_AGENT_MODEL="MODEL_TYPE"             # optional; defaults to LLM_MODEL
 REVIEW_AGENT_MODEL="MODEL_TYPE"            # optional; defaults to GRAPH_AGENT_MODEL
 LLM_API_KEY="API_KEYS"
 LLM_BASE_URL="BASE_URL"
-KDG_DB_PATH="agents/MatCreator/.adk/know_do_graph.db"
 EMBEDDING_MODEL="EMBEDDING_MODEL_TYPE"
 MATCREATOR_AUTO_REVIEW=1
 MATCREATOR_REVIEW_TRIGGER_THRESHOLD=20
@@ -128,6 +127,9 @@ BOHRIUM_VASP_IMAGE=""
 BOHRIUM_VASP_MACHINE=""
 ...
 ```
+
+`KDG_DB_PATH` is optional. If you leave it unset, MatCreator stores the
+knowledge graph at `agents/MatCreator/.adk/know_do_graph.db` by default.
 
 If you prefer different LLM models for sub-agents, you can override the default setting at the `.env` file within sub-agents directories. 
 
@@ -229,7 +231,15 @@ Skills and guides are seeded as durable entries. Agent writes first land in
 MemGraph; repeated successful observations are later distilled into validated
 Know-Do heuristics and linked to the capabilities they improve. Existing
 `skill_graph.db`, `memory_graph.db`, old JSON traces, and `MEMORY.md` data can be migrated
-idempotently. See [docs/knowledge_graph.md](docs/knowledge_graph.md).
+idempotently through `matcreator knowledge migrate`. Normal runtime startup does
+not load legacy sources automatically. See [docs/knowledge_graph.md](docs/knowledge_graph.md).
+
+Retrieval is progressive: MatCreator first searches L1 capabilities/workflows
+and L2 procedures, then conditionally searches only the selected node's attached
+L3 heuristics and L4 constraints. The planning agent can also invoke the
+policy-controlled Know-Do reviewer for graph review or session-memory
+distillation. Nodes marked `peer_reviewed` or `community_tested` are protected
+from mutation during these reviews.
 
 ## Graph-Based Planning
 

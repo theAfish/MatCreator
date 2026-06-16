@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.12.0 (2026-06-14)
+
+### Bug Fixes
+
+- Remove plan tools in flash mode
+  ([`7552ce3`](https://github.com/nlz25/PFD_Agent/commit/7552ce3f3b7e8544f13213561502d19bfbe3ae2e))
+
+- Update agent instructions
+  ([`f7c1527`](https://github.com/nlz25/PFD_Agent/commit/f7c152734b9fc87c48c8f697de042b5536446722))
+
+### Features
+
+- Adding know-do graph
+  ([`dabfd15`](https://github.com/nlz25/PFD_Agent/commit/dabfd15c8edf0dfb3fe60a39511741d6526094c1))
+
+- Auto review graph
+  ([`d34a7fa`](https://github.com/nlz25/PFD_Agent/commit/d34a7fa598f3edc39c29e9cb44d3c2d58c8d0866))
+
+- Graph review
+  ([`62c511f`](https://github.com/nlz25/PFD_Agent/commit/62c511f13657df6c8f381737bf0663a20a97cf21))
+
+
 ## v1.11.0 (2026-06-10)
 
 ### Bug Fixes

@@ -32,7 +32,8 @@ _MEMORY_PATH = _KNOWLEDGE_PATH /"MEMORY.md"
 # Unified Know-Do Graph storage. Default to the agent's ADK directory so the
 # graph lives alongside other MatCreator runtime state unless explicitly
 # overridden with KDG_DB_PATH.
-os.environ.setdefault("KDG_DB_PATH", str(_ADK_DIR))
+DEFAULT_KDG_DB_PATH = _ADK_DIR / "know_do_graph.db"
+os.environ.setdefault("KDG_DB_PATH", str(DEFAULT_KDG_DB_PATH))
 _PROJECT_ROOT = _AGENT_PATH.parents[1]
 _kdg_db_path = Path(os.environ["KDG_DB_PATH"]).expanduser()
 if not _kdg_db_path.is_absolute():

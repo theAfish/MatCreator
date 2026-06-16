@@ -21,8 +21,10 @@ from ...knowledge.query import (
     query_knowledge_graph as _query_knowledge_graph,
     save_to_knowledge_graph as _save_to_knowledge_graph,
     search_skills,
+    search_skill_context,
     get_related_skills,
 )
+from ...knowledge.review import chat_with_knowledge_graph as _chat_with_knowledge_graph
 from ...knowledge.synthesizer import run_knowledge_synthesizer as _run_synthesizer
 
 
@@ -62,6 +64,21 @@ def save_to_knowledge_graph(
         context=context,
         session_id=session_id,
     )
+
+
+def chat_with_knowledge_graph(
+    message: str,
+    tool_context: ToolContext,
+    read_only: bool = False,
+) -> dict:
+    """Send a message to Know-Do Graph's general chat agent.
+
+    Args:
+        message: Natural-language instruction or question for the graph agent.
+        read_only: When true, restrict the KDG session to query-only tools.
+    """
+    del tool_context
+    return _chat_with_knowledge_graph(message, read_only=read_only)
 
 
 def run_synthesizer(
