@@ -2,6 +2,75 @@
 
 <!-- version list -->
 
+## v2.0.0 (2026-06-18)
+
+### Bug Fixes
+
+- Correct pfactor parameter for ase NPT modes
+  ([`13c1e33`](https://github.com/nlz25/PFD_Agent/commit/13c1e33e242a37b1e58f81e08d5e91e490370d6f))
+
+- Improve user management
+  ([`d8261c5`](https://github.com/nlz25/PFD_Agent/commit/d8261c5412d6c3e1afc3e1db63848c3b0e453e74))
+
+- Issues about kdg progressive retrieval
+  ([`e50be7d`](https://github.com/nlz25/PFD_Agent/commit/e50be7dc8d0a14dbfe7f2b8dcaf3b17c92fdf005))
+
+- Issues with step executor and graph logger
+  ([`d11aa02`](https://github.com/nlz25/PFD_Agent/commit/d11aa020dbe8565c6ccd1a4c922b78155beaea8e))
+
+- Issues with the know_do_graph initialization
+  ([`c213ccf`](https://github.com/nlz25/PFD_Agent/commit/c213ccf0c94c958cf522124903f0dcd8a509cadd))
+
+- Kdg frontend use wrong path
+  ([`7f2e0fc`](https://github.com/nlz25/PFD_Agent/commit/7f2e0fc8c748d0564afc1a8fff70c900bd0339c3))
+
+- Legacy path issues for kdg
+  ([`548d2f5`](https://github.com/nlz25/PFD_Agent/commit/548d2f54d7945c4822be7c9bb5f257a35362cb7a))
+
+- Remove old ase-deepmd model and relax results
+  ([`28e4b9e`](https://github.com/nlz25/PFD_Agent/commit/28e4b9e142a1d8a4c60e4aa61dfbf4aeab042e27))
+
+- Resolve merge conflicts between devel and refactor branches
+  ([`8b20581`](https://github.com/nlz25/PFD_Agent/commit/8b205814bb18920d3d3dc62622475302667ce351))
+
+- Review agent bugs
+  ([`bdc37ab`](https://github.com/nlz25/PFD_Agent/commit/bdc37ab7c33dd3988d3155ae324040870710acbf))
+
+- Update front end
+  ([`3bbc01f`](https://github.com/nlz25/PFD_Agent/commit/3bbc01f3cd6a7ced0a8256760f7938674232d6b5))
+
+- Update history tools
+  ([`b06fc40`](https://github.com/nlz25/PFD_Agent/commit/b06fc4014166522ced88a9f54016fc463f3cc538))
+
+- Update import paths in test files
+  ([`cb50b08`](https://github.com/nlz25/PFD_Agent/commit/cb50b08bbda0b35f97dcb044bbe77dcbbbbc3ea8))
+
+- Use new kdg version for optional download
+  ([`0fa0ad0`](https://github.com/nlz25/PFD_Agent/commit/0fa0ad0eadf788c0e6466aadd42d73433068f6d5))
+
+- **dpa4**: Fix YAML frontmatter — move MANDATORY block out of frontmatter
+  ([`53b0276`](https://github.com/nlz25/PFD_Agent/commit/53b02765e5237565d549188a9788a62860501e22))
+
+- **dpa4**: Improve workflow clarity and enforce skill authority
+  ([`da9fc03`](https://github.com/nlz25/PFD_Agent/commit/da9fc03de88122e36f09f0aa4b250e86aa15c4d6))
+
+### Features
+
+- Cli for graph frontend.
+  ([`5a31b58`](https://github.com/nlz25/PFD_Agent/commit/5a31b588620b96bf0e9a4d29674eac37011d1350))
+
+- **dpa4**: Add DPA4 (SeZM/neo) finetuning skill
+  ([`cf32ae6`](https://github.com/nlz25/PFD_Agent/commit/cf32ae60cebef1d4b7a80d1e4bc14350248e206c))
+
+### Refactoring
+
+- Refactor codebase structure
+  ([`bb983c4`](https://github.com/nlz25/PFD_Agent/commit/bb983c406f10d3f0f28e4e9b2ff1fd4682adeb33))
+
+- **dpa4**: Rewrite workflow — DFT labeling & benchmarks, remove zero-shot
+  ([`b15399a`](https://github.com/nlz25/PFD_Agent/commit/b15399a4f24fff0ba13ccae2645b6e9aeee384fc))
+
+
 ## v1.12.0 (2026-06-14)
 
 ### Bug Fixes
