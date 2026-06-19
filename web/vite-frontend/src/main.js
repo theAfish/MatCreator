@@ -2245,6 +2245,8 @@ async function uploadFilesToSession(fileList) {
 async function createSession() {
   state.activeSessionUserId = state.userId;
   const url = `/apps/${APP_NAME}/users/${state.userId}/sessions/${state.sessionId}`;
+  const defaultWorkdir = (state.defaultWorkdir || "").trim();
+  const sessionWorkdir = state.customWorkdir || defaultWorkdir;
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -2252,7 +2254,7 @@ async function createSession() {
       body: JSON.stringify({
         ...(state.agentMode !== "normal" ? { agent_mode: state.agentMode } : {}),
         ...(state.agentMode === "bench" ? { benchmark_mode: true } : {}),
-        ...(state.customWorkdir ? { custom_workdir: state.customWorkdir } : {}),
+        ...(sessionWorkdir ? { custom_workdir: sessionWorkdir } : {}),
       }),
     });
     if (!resp.ok) {
@@ -3270,6 +3272,7 @@ async function loadSettingsData() {
 
 async function saveSettings() {
   const username = settingsUsername.value.trim();
+  const nextDefaultWorkdir = document.getElementById("settings-default-workdir")?.value?.trim() || "";
   const extraSkills = Array.from(
     skillsChecklist.querySelectorAll(".skill-checkbox:not(:disabled)")
   )
@@ -3305,7 +3308,7 @@ async function saveSettings() {
           planning: { extra_skills: extraSkills },
           skills: { disabled: disabledSkills },
           user: username ? { name: username } : undefined,
-          workspace: { default_workdir: document.getElementById("settings-default-workdir")?.value?.trim() || "" },
+          workspace: { default_workdir: nextDefaultWorkdir },
         }),
       }),
     ];
@@ -3328,6 +3331,7 @@ async function saveSettings() {
       closeSettingsModal();
       await applyLogin(username, null);
     }
+    state.defaultWorkdir = nextDefaultWorkdir;
     settingsStatus.textContent = "Saved ✓";
     setTimeout(() => { settingsStatus.textContent = ""; }, 2000);
   } catch (err) {

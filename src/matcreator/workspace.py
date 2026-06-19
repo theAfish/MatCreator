@@ -1,8 +1,9 @@
-"""Workspace management for MatClaw — project-local overlay of skills/guides/memory.
+"""Workspace management for MatCreator — project-local overlay of skills/guides/memory.
 
 The workspace root is resolved in this order:
 1. ``MATCLAW_WORKSPACE`` environment variable (absolute or relative to CWD)
-2. ``~/.matcreator/workspace/`` (user-global default)
+2. ``workspace.default_workdir`` in ``~/.matcreator/config.yaml``
+3. ``~/.matcreator/workspace/`` (user-global default)
 
 On first use, call :func:`init_workspace` to create the directory tree.
 Default skills are loaded directly from the module; only custom (user-created)
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from .config import load_config
 from .constants import _AGENT_PATH
 
 
@@ -26,12 +28,16 @@ def get_workspace_root() -> Path:
     env_val = os.environ.get("MATCLAW_WORKSPACE", "")
     if env_val:
         return Path(env_val).expanduser().resolve()
+    cfg_workdir = (load_config().get("workspace") or {}).get("default_workdir") or ""
+    if cfg_workdir:
+        return Path(cfg_workdir).expanduser().resolve()
     matcreator_home = Path(
         os.environ.get("MATCREATOR_HOME", str(Path.home() / ".matcreator"))
     ).expanduser()
     return (matcreator_home / "workspace").resolve()
 
-WORKSPACE_ROOT=get_workspace_root()  # resolved once at module load time for efficiency
+
+WORKSPACE_ROOT = get_workspace_root()  # Backward-compatible startup snapshot; prefer get_workspace_root().
 
 ADK_DIR = (
     Path(os.environ.get("MATCREATOR_HOME", str(Path.home() / ".matcreator"))).expanduser()
@@ -40,15 +46,15 @@ ADK_DIR = (
 
 
 def workspace_skills_dir() -> Path:
-    return WORKSPACE_ROOT / "skills"
+    return get_workspace_root() / "skills"
 
 
 def workspace_guides_dir() -> Path:
-    return WORKSPACE_ROOT / "guides"
+    return get_workspace_root() / "guides"
 
 
 def workspace_memory_path() -> Path:
-    return WORKSPACE_ROOT / "MEMORY.md"
+    return get_workspace_root() / "MEMORY.md"
 
 
 def get_session_workdir(session_id: str, custom_workdir: str | None = None) -> Path:
@@ -57,7 +63,7 @@ def get_session_workdir(session_id: str, custom_workdir: str | None = None) -> P
     env_val = os.environ.get("MATCLAW_SESSION_DIR", "")
     if env_val:
         return Path(env_val).expanduser().resolve()
-    return WORKSPACE_ROOT
+    return get_workspace_root()
 
 
 def init_session_workdir(session_id: str, custom_workdir: str | None = None) -> Path:
@@ -82,7 +88,7 @@ def init_workspace(force: bool = False) -> str:
 
     Returns a human-readable status message.
     """
-    root = WORKSPACE_ROOT
+    root = get_workspace_root()
     skills_dir = workspace_skills_dir()
     guides_dir = workspace_guides_dir()
 

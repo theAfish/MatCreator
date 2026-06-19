@@ -23,6 +23,7 @@ Examples:
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -41,6 +42,17 @@ _MATCREATOR_HOME = Path(os.environ.get("MATCREATOR_HOME", "~/.matcreator")).expa
 _CONFIG_PATH = _MATCREATOR_HOME / "config.yaml"
 _DEFAULT_ADK_DIR = _MATCREATOR_HOME / ".adk"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _configure_logging(log_level: str) -> None:
+    """Route MatCreator/ADK logger output to stderr for launcher log capture."""
+    level_name = (log_level or "info").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    log_format = "%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+    logging.basicConfig(level=level, format=log_format)
+    logging.getLogger().setLevel(level)
+    logging.getLogger("google_adk").setLevel(level)
+    logging.getLogger("matcreator").setLevel(level)
 
 
 def _make_agent_loader():
@@ -74,6 +86,8 @@ def _start_adk_server(
     """Start the ADK server programmatically with controlled session storage."""
     import uvicorn
     from google.adk.cli.fast_api import get_fast_api_app
+
+    _configure_logging(log_level)
 
     session_db = _DEFAULT_ADK_DIR / "session.db"
     session_db.parent.mkdir(parents=True, exist_ok=True)
@@ -131,16 +145,22 @@ def _default_workspace() -> Path:
     env_val = os.environ.get("MATCLAW_WORKSPACE", "")
     if env_val:
         return Path(env_val).expanduser().resolve()
-    return Path.home() / ".matcreator" / "workspace"
+
+    from matcreator.config import load_config
+
+    cfg_workdir = (load_config().get("workspace") or {}).get("default_workdir") or ""
+    if cfg_workdir:
+        return Path(cfg_workdir).expanduser().resolve()
+    return _MATCREATOR_HOME / "workspace"
 
 
 def _setup_workspace(workspace: str | None) -> Path:
     """Set MATCLAW_WORKSPACE env var and return the resolved path."""
     if workspace:
         ws_root = Path(workspace).expanduser().resolve()
+        os.environ["MATCLAW_WORKSPACE"] = str(ws_root)
     else:
         ws_root = _default_workspace()
-    os.environ["MATCLAW_WORKSPACE"] = str(ws_root)
     ws_root.mkdir(parents=True, exist_ok=True)
     click.echo(f"Workspace: {ws_root}")
     return ws_root

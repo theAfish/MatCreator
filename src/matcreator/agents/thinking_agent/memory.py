@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import os
 from google.adk.tools import ToolContext
-from ...workspace import WORKSPACE_ROOT
-
-_MEMORY_PATH = WORKSPACE_ROOT / "MEMORY.md"
+from ...workspace import workspace_memory_path
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +109,9 @@ def run_synthesizer(
 
 def load_memory() -> str:
     """Return the full contents of MEMORY.md, or an empty string if missing."""
+    memory_path = workspace_memory_path()
     try:
-        with open(_MEMORY_PATH, "r") as f:
+        with open(memory_path, "r") as f:
             return f.read()
     except FileNotFoundError:
         return ""
@@ -120,10 +119,11 @@ def load_memory() -> str:
 
 def write_memory(content: str) -> str:
     """Append *content* to MEMORY.md and return a confirmation message."""
-    os.makedirs(os.path.dirname(_MEMORY_PATH), exist_ok=True)
-    with open(_MEMORY_PATH, "a") as f:
+    memory_path = workspace_memory_path()
+    os.makedirs(os.path.dirname(memory_path), exist_ok=True)
+    with open(memory_path, "a") as f:
         f.write(content)
-    return f"Memory appended successfully at {_MEMORY_PATH}"
+    return f"Memory appended successfully at {memory_path}"
 
 
 def update_memory(new_entries: str) -> str:

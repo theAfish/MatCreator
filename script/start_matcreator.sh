@@ -2,7 +2,10 @@
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOG_DIR="$PROJ_ROOT/logs"
+MATCREATOR_HOME="${MATCREATOR_HOME:-$HOME/.matcreator}"
+MATCREATOR_HOME="${MATCREATOR_HOME/#\~/$HOME}"
+LOG_DIR="${MATCREATOR_LOG_DIR:-$MATCREATOR_HOME/logs}"
+LOG_DIR="${LOG_DIR/#\~/$HOME}"
 mkdir -p "$LOG_DIR"
 
 cleanup() {
@@ -19,7 +22,8 @@ trap cleanup SIGINT SIGTERM
 cd "$PROJ_ROOT"
 
 echo "Starting ADK API server (port 8000)..."
-matcreator api-server >"$LOG_DIR/api-server.log" 2>&1 &
+MATCREATOR_API_LOG_LEVEL="${MATCREATOR_API_LOG_LEVEL:-info}"
+matcreator api-server --log-level "$MATCREATOR_API_LOG_LEVEL" >"$LOG_DIR/api-server.log" 2>&1 &
 PID_API=$!
 sleep 1
 

@@ -10,7 +10,7 @@ from typing import Any
 
 from know_do_graph import EdgeRelation
 
-from ..workspace import WORKSPACE_ROOT
+from ..workspace import get_workspace_root
 from .kdg_memory import add_memory, connect_once
 from .kg_state import (
     get_extraction_cursor,
@@ -94,7 +94,7 @@ def _parse_extraction(raw: str) -> list[dict[str, Any]]:
 
 def _read_trajectory_delta(session_id: str, start_line: int = 0) -> tuple[str, int]:
     """Return summaries appended after ``start_line`` and the current line count."""
-    traj_path = WORKSPACE_ROOT / "trajectories" / f"{session_id}.jsonl"
+    traj_path = get_workspace_root() / "trajectories" / f"{session_id}.jsonl"
     if not traj_path.exists():
         return "", 0
     raw_lines = traj_path.read_text(encoding="utf-8").splitlines()
@@ -120,7 +120,7 @@ def _read_trajectory(session_id: str) -> str:
 
 def _read_session_summary(session_id: str) -> str:
     """Return a formatted session-level summary if one was written by the thinking agent."""
-    summary_path = WORKSPACE_ROOT / "trajectories" / f"{session_id}_summary.json"
+    summary_path = get_workspace_root() / "trajectories" / f"{session_id}_summary.json"
     if not summary_path.exists():
         return "(No session summary available)"
     try:

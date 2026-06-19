@@ -61,10 +61,10 @@ def migrate_memory_md(memory_path: str | None = None) -> dict:
     Returns:
         Dict with keys: status, nodes_created, skipped, message.
     """
-    from ..workspace import WORKSPACE_ROOT
+    from ..workspace import workspace_memory_path
 
     if memory_path is None:
-        path = WORKSPACE_ROOT / "MEMORY.md"
+        path = workspace_memory_path()
     else:
         from pathlib import Path
         path = Path(memory_path)
