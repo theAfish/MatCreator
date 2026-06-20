@@ -413,6 +413,7 @@ class AgentGraphView {
 
     const rawNodes = Object.values(graphData.nodes);
     this._nodeData = graphData.nodes;
+    stepExecutionFeed.update(graphData);
     const displayEdges = this._buildDisplayEdges(rawNodes, graphData.edges || []);
     const levels = this._computeLevels(rawNodes, displayEdges);
     this._resizeSurface(levels);
@@ -610,8 +611,8 @@ class AgentGraphView {
       document.getElementById("detail-toolcalls-row").style.display = "none";
     }
 
-    // Conversation transcript
-    const conversation = raw.conversation || [];
+    // Conversation transcript is rendered live in the main chat step feed.
+    const conversation = raw.type === "step" ? [] : (raw.conversation || []);
     this._detailConversation.innerHTML = "";
     if (conversation.length) {
       conversation.forEach((evt) => {
@@ -633,6 +634,7 @@ class AgentGraphView {
     }
 
     this._detailEl.classList.remove("hidden");
+    if (raw.type === "step") stepExecutionFeed.highlight(raw.id);
     syncPanelResizerVisibility();
     if (preserveScroll) {
       this._restoreOpenToolCallKeys(prevOpenToolCallKeys);
@@ -649,6 +651,202 @@ class AgentGraphView {
   notifyLayoutChanged() {
     if (!this._network) return;
     this._network.redraw();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step executor feed in the main chat window
+// ---------------------------------------------------------------------------
+
+class StepExecutionFeed {
+  constructor() {
+    this._cards = new Map();
+    this._userOpen = new Map();
+    this._nestedOpen = new Map();
+    this._highlightedId = null;
+  }
+
+  reset() {
+    this._cards.clear();
+    this._userOpen.clear();
+    this._nestedOpen.clear();
+    this._highlightedId = null;
+  }
+
+  update(graphData) {
+    if (!graphData || typeof graphData.nodes !== "object") return;
+    const steps = Object.values(graphData.nodes)
+      .filter((node) => node.type === "step")
+      .sort((a, b) => {
+        const ta = a.start_time ? new Date(a.start_time).getTime() : Infinity;
+        const tb = b.start_time ? new Date(b.start_time).getTime() : Infinity;
+        return ta - tb;
+      });
+
+    const seen = new Set(steps.map((node) => node.id));
+    for (const nodeId of this._cards.keys()) {
+      if (!seen.has(nodeId)) {
+        this._cards.delete(nodeId);
+        this._nestedOpen.delete(nodeId);
+      }
+    }
+
+    const shouldStick = isChatNearBottom();
+    steps.forEach((node) => this._upsert(node));
+    if (shouldStick) scrollToBottom();
+  }
+
+  highlight(nodeId) {
+    this._highlightedId = nodeId;
+    for (const [id, card] of this._cards.entries()) {
+      card.classList.toggle("step-feed-highlight", id === nodeId);
+    }
+    const card = this._cards.get(nodeId);
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      setTimeout(() => card.classList.remove("step-feed-highlight"), 1600);
+    }
+  }
+
+  _upsert(node) {
+    let outer = this._cards.get(node.id);
+    if (!outer || !chatArea.contains(outer)) {
+      outer = this._createCard(node);
+      this._cards.set(node.id, outer);
+      chatArea.appendChild(outer);
+    }
+    this._renderCard(outer, node);
+  }
+
+  _createCard(node) {
+    const outer = document.createElement("div");
+    outer.className = "message agent-message step-feed-message";
+    outer.dataset.stepNodeId = node.id;
+    outer.appendChild(createAgentAvatarEl());
+
+    const bubble = document.createElement("div");
+    bubble.className = "message-bubble step-feed-bubble";
+    const details = document.createElement("details");
+    details.className = "step-feed-details";
+    details.addEventListener("toggle", () => {
+      this._userOpen.set(node.id, details.open);
+    });
+    bubble.appendChild(details);
+    outer.appendChild(bubble);
+    return outer;
+  }
+
+  _wireNested(nodeId, key, details) {
+    let nodeState = this._nestedOpen.get(nodeId);
+    if (!nodeState) {
+      nodeState = new Map();
+      this._nestedOpen.set(nodeId, nodeState);
+    }
+    if (nodeState.has(key)) {
+      details.open = nodeState.get(key);
+    }
+    details.dataset.stepNestedKey = key;
+    details.addEventListener("toggle", (event) => {
+      if (event.target !== details) return;
+      nodeState.set(key, details.open);
+    });
+    return details;
+  }
+
+  _renderCard(outer, node) {
+    outer.dataset.stepNodeId = node.id;
+    outer.classList.toggle("step-feed-highlight", this._highlightedId === node.id);
+
+    const details = outer.querySelector(".step-feed-details");
+    const userChoice = this._userOpen.get(node.id);
+    details.open = userChoice === undefined ? node.status === "running" : userChoice;
+    details.innerHTML = "";
+
+    const summary = document.createElement("summary");
+    summary.className = "step-feed-summary";
+    const title = document.createElement("span");
+    title.className = "step-feed-title";
+    title.textContent = stepFeedTitle(node);
+    const badge = document.createElement("span");
+    badge.className = `badge badge-${node.status || "idle"}`;
+    badge.textContent = node.status || "idle";
+    const meta = document.createElement("span");
+    meta.className = "step-feed-meta";
+    meta.textContent = formatStepDuration(node);
+    summary.append(title, badge, meta);
+    details.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "step-feed-body";
+
+    if (node.summary) {
+      const p = document.createElement("div");
+      p.className = "step-feed-node-summary";
+      p.textContent = node.summary;
+      body.appendChild(p);
+    }
+
+    if (node.input && Object.keys(node.input).length) {
+      body.appendChild(this._wireNested(node.id, "input", renderStepInput(node.input)));
+    }
+
+    const conversation = node.conversation || [];
+    if (conversation.length) {
+      const section = document.createElement("div");
+      section.className = "step-feed-section";
+      const label = document.createElement("div");
+      label.className = "step-feed-section-title";
+      label.textContent = `Conversation (${conversation.length})`;
+      section.appendChild(label);
+      conversation.forEach((evt, idx) => {
+        const key = `conversation:${idx}:${evt.timestamp || ""}:${evt.type || ""}:${evt.author || ""}`;
+        section.appendChild(this._wireNested(node.id, key, renderStepConversationEvent(evt)));
+      });
+      body.appendChild(section);
+    }
+
+    const toolCalls = node.tool_calls || [];
+    if (toolCalls.length) {
+      const section = document.createElement("div");
+      section.className = "step-feed-section";
+      const label = document.createElement("div");
+      label.className = "step-feed-section-title";
+      label.textContent = `Tool calls (${toolCalls.length})`;
+      section.appendChild(label);
+      toolCalls.forEach((tc, idx) => {
+        const key = `tool:${idx}:${tc.name || ""}:${tc.start_time || ""}`;
+        section.appendChild(this._wireNested(node.id, key, renderStepToolCall(tc)));
+      });
+      body.appendChild(section);
+    }
+
+    const artifacts = node.artifacts || [];
+    if (artifacts.length) {
+      const section = document.createElement("div");
+      section.className = "step-feed-section";
+      const label = document.createElement("div");
+      label.className = "step-feed-section-title";
+      label.textContent = "Artifacts";
+      const list = document.createElement("ul");
+      list.className = "detail-artifacts step-feed-artifacts";
+      artifacts.forEach((artifact) => {
+        const li = document.createElement("li");
+        li.textContent = artifact.split("/").pop();
+        li.title = artifact;
+        list.appendChild(li);
+      });
+      section.append(label, list);
+      body.appendChild(section);
+    }
+
+    if (!body.childElementCount) {
+      const empty = document.createElement("div");
+      empty.className = "step-feed-empty";
+      empty.textContent = "Waiting for step executor events…";
+      body.appendChild(empty);
+    }
+
+    details.appendChild(body);
   }
 }
 
@@ -843,6 +1041,7 @@ class ExecutionPlanView {
   }
 }
 
+const stepExecutionFeed = new StepExecutionFeed();
 const agentGraph = new AgentGraphView("agent-graph");
 const planGraph = new ExecutionPlanView("plan-graph-canvas");
 
@@ -1204,6 +1403,7 @@ async function logout() {
   localStorage.removeItem("mat_deploymentMode");
   userDisplay.textContent = "—";
   chatArea.innerHTML = "";
+  stepExecutionFeed.reset();
   sessionListEl.innerHTML = '<li class="empty">Sign in to see sessions</li>';
   renderSessionFilesTree([]);
   clearCurrentUploads();
@@ -1261,6 +1461,7 @@ function _applySession(result) {
   localStorage.setItem("mat_sessionId", state.sessionId);
   sessionIdEl.textContent = state.sessionId;
   chatArea.innerHTML = "";
+  stepExecutionFeed.reset();
   renderSessionFilesTree([]);
   clearCurrentUploads();
   agentGraph.reset();
@@ -1600,6 +1801,7 @@ async function deleteSession(sessionId) {
       localStorage.setItem("mat_sessionId", state.sessionId);
       sessionIdEl.textContent = state.sessionId;
       chatArea.innerHTML = "";
+      stepExecutionFeed.reset();
       renderSessionFilesTree([]);
       clearCurrentUploads();
       agentGraph.reset();
@@ -1672,6 +1874,10 @@ function createUserAvatarEl() {
 
 function scrollToBottom() {
   chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function isChatNearBottom() {
+  return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 80;
 }
 
 function addMessage(role, content) {
@@ -1808,6 +2014,72 @@ function addAgentTimelineMessage(timeline, shownPlotPaths = null) {
   chatArea.appendChild(outer);
   renderTimeline(inner, timeline, shownPlotPaths);
   return inner;
+}
+
+function formatStepDuration(node) {
+  if (!node.start_time) return "—";
+  if (!node.end_time) return "running…";
+  const secs = ((new Date(node.end_time) - new Date(node.start_time)) / 1000).toFixed(1);
+  return `${secs}s`;
+}
+
+function stepFeedTitle(node) {
+  const input = node.input || {};
+  const label = node.label || input.node_id || node.id;
+  const action = input.action ? ` — ${input.action}` : "";
+  return `${label}${action}`;
+}
+
+function renderStepInput(input) {
+  const details = document.createElement("details");
+  details.className = "step-feed-nested";
+  const summary = document.createElement("summary");
+  summary.textContent = "Input";
+  details.appendChild(summary);
+  const pre = document.createElement("pre");
+  pre.className = "json-block";
+  pre.textContent = JSON.stringify(input, null, 2);
+  details.appendChild(pre);
+  return details;
+}
+
+function renderStepConversationEvent(evt) {
+  const details = document.createElement("details");
+  details.className = `timeline-${evt.type} step-feed-nested`;
+  const summary = document.createElement("summary");
+  const icon = evt.type === "thought" ? "💭" : evt.type === "text" ? "💬" : evt.type === "function_call" ? "🔧" : "↩";
+  summary.textContent = `${icon} [${evt.author || "step_executor"}] ${evt.type || "event"}`;
+  details.appendChild(summary);
+  const pre = document.createElement("pre");
+  pre.className = "json-block";
+  pre.textContent = evt.content || "";
+  details.appendChild(pre);
+  return details;
+}
+
+function renderStepToolCall(tc) {
+  const details = document.createElement("details");
+  details.className = "timeline-function-call step-feed-nested";
+  const dur = tc.start_time && tc.end_time
+    ? ` (${((new Date(tc.end_time) - new Date(tc.start_time)) / 1000).toFixed(1)}s)`
+    : "";
+  const summary = document.createElement("summary");
+  summary.textContent = `🔧 ${tc.name || "tool"}${dur}`;
+  details.appendChild(summary);
+  if (tc.args_summary) {
+    const pre = document.createElement("pre");
+    pre.className = "json-block";
+    pre.textContent = tc.args_summary;
+    details.appendChild(pre);
+  }
+  if (tc.result_summary) {
+    const pre = document.createElement("pre");
+    pre.className = "json-block";
+    pre.style.borderTop = "1px solid rgba(255,255,255,0.06)";
+    pre.textContent = `→ ${tc.result_summary}`;
+    details.appendChild(pre);
+  }
+  return details;
 }
 
 // Classify a file path as "structure", "image", or "artifact" by extension/name.
@@ -2403,6 +2675,7 @@ async function loadSession(sessionId) {
 
     // Rebuild chat from server-canonical state
     chatArea.innerHTML = "";
+    stepExecutionFeed.reset();
 
     // First pass: collect all functionResponses keyed by ID for cross-event matching
     const frById = {};
@@ -2940,6 +3213,7 @@ async function _doNewSession(customWorkdir) {
   localStorage.setItem("mat_sessionId", state.sessionId);
   sessionIdEl.textContent = state.sessionId;
   chatArea.innerHTML = "";
+  stepExecutionFeed.reset();
   renderSessionFilesTree([]);
   clearCurrentUploads();
   agentGraph.reset();

@@ -398,6 +398,107 @@ body {
   box-shadow: 0 10px 30px rgba(168, 85, 247, 0.1);
 }
 
+.step-feed-message .message-bubble {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.10), rgba(125, 211, 252, 0.06));
+  border-color: rgba(16, 185, 129, 0.24);
+}
+
+.step-feed-highlight .message-bubble {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.22), 0 10px 30px rgba(125, 211, 252, 0.14);
+}
+
+.step-feed-details > summary {
+  list-style: none;
+}
+
+.step-feed-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.step-feed-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.step-feed-summary::before {
+  content: "▸";
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.step-feed-details[open] > .step-feed-summary::before {
+  transform: rotate(90deg);
+}
+
+.step-feed-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-feed-meta {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.step-feed-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step-feed-node-summary {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.step-feed-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.step-feed-section-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.step-feed-empty {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.step-feed-artifacts {
+  margin-top: 2px;
+}
+
+details.step-feed-nested {
+  margin: 4px 0;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+
 .message-avatar {
   width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center; overflow: hidden;
