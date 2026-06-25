@@ -592,16 +592,11 @@ class AgentGraphView {
         s.textContent = `🔧 ${tc.name}${dur}`;
         d.appendChild(s);
         if (tc.args_summary) {
-          const pre = document.createElement("pre");
-          pre.className = "json-block";
-          pre.textContent = tc.args_summary;
-          d.appendChild(pre);
+          d.appendChild(createJsonBlock(tc.args_summary));
         }
         if (tc.result_summary) {
-          const pre = document.createElement("pre");
-          pre.className = "json-block";
+          const pre = createJsonBlock(`→ ${tc.result_summary}`);
           pre.style.borderTop = "1px solid rgba(255,255,255,0.06)";
-          pre.textContent = `→ ${tc.result_summary}`;
           d.appendChild(pre);
         }
         this._detailToolcalls.appendChild(d);
@@ -622,10 +617,7 @@ class AgentGraphView {
         const icon = evt.type === "thought" ? "💭" : evt.type === "text" ? "💬" : evt.type === "function_call" ? "🔧" : "↩";
         s.textContent = `${icon} [${evt.author}] ${evt.type}`;
         d.appendChild(s);
-        const pre = document.createElement("pre");
-        pre.className = "json-block";
-        pre.textContent = evt.content;
-        d.appendChild(pre);
+        d.appendChild(createJsonBlock(evt.content));
         this._detailConversation.appendChild(d);
       });
       document.getElementById("detail-conversation-row").style.display = "";
@@ -713,15 +705,57 @@ class StepExecutionFeed {
     if (!outer || !chatArea.contains(outer)) {
       outer = this._createCard(node);
       this._cards.set(node.id, outer);
-      chatArea.appendChild(outer);
+      this._insertSorted(outer, node);
     }
     this._renderCard(outer, node);
+  }
+
+  _insertSorted(outer, node) {
+    const newTime = node.start_time ? new Date(node.start_time).getTime() : Infinity;
+    outer.dataset.stepStartTime = String(newTime);
+
+    // Walk all chat children to find the right insertion point.
+    // - Step cards: compare by start_time, insert before the first later one.
+    // - User/agent messages: track as anchor, but reset when a step card is
+    //   found after them (so we insert after the most recent step card too).
+    const children = [...chatArea.children];
+    let insertAfter = null; // element to insert after (null = before first child)
+
+    for (const el of children) {
+      if (el === outer) continue;
+
+      if (el.dataset.stepStartTime) {
+        const elTime = Number(el.dataset.stepStartTime);
+        if (newTime < elTime) {
+          // Found a later step card — insert before it
+          if (insertAfter) {
+            chatArea.insertBefore(outer, insertAfter.nextElementSibling);
+          } else {
+            chatArea.insertBefore(outer, el);
+          }
+          return;
+        }
+        // This step card is earlier — update anchor
+        insertAfter = el;
+      } else if (el.dataset.msgIndex !== undefined) {
+        // User/agent message — update anchor
+        insertAfter = el;
+      }
+    }
+
+    // No later step card found — insert after the last tracked element.
+    if (insertAfter) {
+      chatArea.insertBefore(outer, insertAfter.nextElementSibling);
+    } else {
+      chatArea.appendChild(outer);
+    }
   }
 
   _createCard(node) {
     const outer = document.createElement("div");
     outer.className = "message agent-message step-feed-message";
     outer.dataset.stepNodeId = node.id;
+    outer.dataset.stepStartTime = node.start_time ? String(new Date(node.start_time).getTime()) : "";
     outer.appendChild(createAgentAvatarEl());
 
     const bubble = document.createElement("div");
@@ -794,14 +828,20 @@ class StepExecutionFeed {
     if (conversation.length) {
       const section = document.createElement("div");
       section.className = "step-feed-section";
-      const label = document.createElement("div");
-      label.className = "step-feed-section-title";
-      label.textContent = `Conversation (${conversation.length})`;
-      section.appendChild(label);
+      const sectionDetails = document.createElement("details");
+      sectionDetails.className = "step-feed-section-details";
+      const sectionSummary = document.createElement("summary");
+      sectionSummary.className = "step-feed-section-title";
+      sectionSummary.textContent = `Conversations (${conversation.length})`;
+      sectionDetails.appendChild(sectionSummary);
       conversation.forEach((evt, idx) => {
         const key = `conversation:${idx}:${evt.timestamp || ""}:${evt.type || ""}:${evt.author || ""}`;
-        section.appendChild(this._wireNested(node.id, key, renderStepConversationEvent(evt)));
+        sectionDetails.appendChild(this._wireNested(node.id, key, renderStepConversationEvent(evt)));
       });
+      sectionDetails.addEventListener("toggle", () => {
+        sectionSummary.classList.toggle("open", sectionDetails.open);
+      });
+      section.appendChild(this._wireNested(node.id, "section:conversation", sectionDetails));
       body.appendChild(section);
     }
 
@@ -809,14 +849,20 @@ class StepExecutionFeed {
     if (toolCalls.length) {
       const section = document.createElement("div");
       section.className = "step-feed-section";
-      const label = document.createElement("div");
-      label.className = "step-feed-section-title";
-      label.textContent = `Tool calls (${toolCalls.length})`;
-      section.appendChild(label);
+      const sectionDetails = document.createElement("details");
+      sectionDetails.className = "step-feed-section-details";
+      const sectionSummary = document.createElement("summary");
+      sectionSummary.className = "step-feed-section-title";
+      sectionSummary.textContent = `Tool calls (${toolCalls.length})`;
+      sectionDetails.appendChild(sectionSummary);
       toolCalls.forEach((tc, idx) => {
         const key = `tool:${idx}:${tc.name || ""}:${tc.start_time || ""}`;
-        section.appendChild(this._wireNested(node.id, key, renderStepToolCall(tc)));
+        sectionDetails.appendChild(this._wireNested(node.id, key, renderStepToolCall(tc)));
       });
+      sectionDetails.addEventListener("toggle", () => {
+        sectionSummary.classList.toggle("open", sectionDetails.open);
+      });
+      section.appendChild(this._wireNested(node.id, "section:toolcalls", sectionDetails));
       body.appendChild(section);
     }
 
@@ -857,7 +903,7 @@ class StepExecutionFeed {
 const PLAN_NODE_STATUS_COLORS = {
   pending:   { bg: "#374151", border: "#6B7280", font: "#9CA3AF" },
   running:   { bg: "#FBBF24", border: "#F59E0B", font: "#1a1a1a" },
-  success:   { bg: "#10B981", border: "#059669", font: "#fff" },
+  success:   { bg: "#10B981", border: "#059669", font: "#043F2E" },
   failed:    { bg: "#EF4444", border: "#DC2626", font: "#fff" },
   blocked:   { bg: "#1F2937", border: "#374151", font: "#4B5563" },
 };
@@ -877,10 +923,10 @@ class ExecutionPlanView {
     const options = {
       layout: {
         hierarchical: {
-          direction: "UD",
+          direction: "LR",
           sortMethod: "directed",
           nodeSpacing: 120,
-          levelSeparation: 90,
+          levelSeparation: 170,
           blockShifting: true,
           edgeMinimization: true,
         },
@@ -890,13 +936,13 @@ class ExecutionPlanView {
         arrows: { to: { enabled: true, scaleFactor: 0.6 } },
         color: { color: "#4B5563", highlight: "#9CA3AF" },
         width: 1.5,
-        smooth: { type: "cubicBezier", forceDirection: "vertical" },
+        smooth: { type: "cubicBezier", forceDirection: "horizontal" },
       },
       nodes: {
         shape: "box",
         borderWidth: 2,
         borderWidthSelected: 3,
-        font: { size: 14, face: "Manrope, sans-serif" },
+        font: { size: 14, face: "Manrope, sans-serif", bold: true },
         margin: { top: 8, bottom: 8, left: 12, right: 12 },
       },
       interaction: {
@@ -951,7 +997,7 @@ class ExecutionPlanView {
         border: colors.border,
         highlight: { background: colors.border, border: colors.border },
       },
-      font: { color: colors.font, size: 14 },
+      font: { color: colors.font, size: 14, bold: true, face: "Manrope, sans-serif" },
       shapeProperties: isRunning ? { borderDashes: [4, 3] } : {},
       borderWidth: isRunning ? 2.5 : 2,
     };
@@ -981,19 +1027,42 @@ class ExecutionPlanView {
         to,
         physics: false,
         hidden: false,
-        smooth: { type: "cubicBezier", forceDirection: "vertical" },
+        smooth: { type: "cubicBezier", forceDirection: "horizontal" },
       };
     });
 
     // Rebuild via setData so hierarchical layout sees nodes + edges together.
-    // Re-fit only when structure changes to avoid jarring jumps on status updates.
+    // Only fit on very first load; after that preserve the user's camera position.
     const structureKey = JSON.stringify({ ids: [...nodeIds].sort(), edges: rawEdges });
     const structureChanged = structureKey !== this._structureKey;
+
+    // Save camera before setData resets the layout
+    let savedCamera = null;
+    if (this._didInitialFit) {
+      try {
+        savedCamera = {
+          position: this._network.getViewPosition(),
+          scale: this._network.getScale(),
+        };
+      } catch (_) {}
+    }
+
     this._network.setData({ nodes: new DataSet(visNodes), edges: new DataSet(visEdges) });
-    if (structureChanged || !this._didInitialFit) {
+
+    if (!this._didInitialFit) {
       this._structureKey = structureKey;
       this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
       this._didInitialFit = true;
+    } else {
+      if (structureChanged) this._structureKey = structureKey;
+      // Restore the user's camera position
+      if (savedCamera) {
+        this._network.moveTo({
+          position: savedCamera.position,
+          scale: savedCamera.scale,
+          animation: false,
+        });
+      }
     }
   }
 
@@ -1032,7 +1101,26 @@ class ExecutionPlanView {
 
   notifyLayoutChanged() {
     this._network?.redraw();
-    this._network?.fit({ animation: false });
+    if (!this._didInitialFit) {
+      this._network?.fit({ animation: false });
+    }
+  }
+
+  zoomIn() {
+    if (!this._network) return;
+    const scale = this._network.getScale() * 1.3;
+    this._network.moveTo({ scale, animation: { duration: 200, easingFunction: "easeInOutQuad" } });
+  }
+
+  zoomOut() {
+    if (!this._network) return;
+    const scale = this._network.getScale() / 1.3;
+    this._network.moveTo({ scale, animation: { duration: 200, easingFunction: "easeInOutQuad" } });
+  }
+
+  fitToView() {
+    if (!this._network) return;
+    this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
   }
 
   _setStatus(s) {
@@ -1071,6 +1159,9 @@ planGraphToggleBtn?.addEventListener("click", () => {
 });
 
 planGraphCloseBtn?.addEventListener("click", hidePlanGraph);
+document.getElementById("plan-graph-zoom-in")?.addEventListener("click", () => planGraph.zoomIn());
+document.getElementById("plan-graph-zoom-out")?.addEventListener("click", () => planGraph.zoomOut());
+document.getElementById("plan-graph-fit")?.addEventListener("click", () => planGraph.fitToView());
 // ---------------------------------------------------------------------------
 
 function isMobileLayout() {
@@ -1831,6 +1922,108 @@ function pathToApiUrl(path) {
 // Chat helpers
 // ---------------------------------------------------------------------------
 
+// Post-process marked output: wrap ASCII art (box-drawing chars) in <pre>.
+const BOX_RE = /[┌┐└┘├┤┬┴┼│━─]/;
+function renderMarkdown(text) {
+  if (!text) return "";
+  let html = marked.parse(text);
+  html = html.replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/gi, (match, inner) => {
+    const decoded = inner.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    return BOX_RE.test(decoded) ? `<pre class="ascii-art">${decoded}</pre>` : match;
+  });
+  html = html.replace(/<p>([\s\S]*?)<\/p>/gi, (match, inner) => {
+    const decoded = inner.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    return BOX_RE.test(decoded) ? `<pre class="ascii-art">${decoded}</pre>` : match;
+  });
+  return html;
+}
+
+// Unescape common escape sequences in text content.
+// Converts literal \n, \t, \r, \\ to actual characters.
+function unescapeText(text) {
+  if (!text) return "";
+  return text
+    .replace(/\\\\/g, "\x00")    // protect literal backslashes
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "\r")
+    .replace(/\\"/g, '"')
+    .replace(/\x00/g, "\\");     // restore literal backslashes
+}
+
+// Cached character widths for wrap calculation (ASCII and CJK)
+let _asciiWidth = 0;
+let _cjkWidth = 0;
+function getCharWidths() {
+  if (_asciiWidth) return { ascii: _asciiWidth, cjk: _cjkWidth };
+  const s = document.createElement("span");
+  s.style.cssText = "position:absolute;visibility:hidden;font:14px 'Courier New',Consolas,monospace;white-space:pre;";
+  document.body.appendChild(s);
+  s.textContent = "x";
+  _asciiWidth = s.getBoundingClientRect().width;
+  s.textContent = "中";
+  _cjkWidth = s.getBoundingClientRect().width;
+  document.body.removeChild(s);
+  return { ascii: _asciiWidth, cjk: _cjkWidth };
+}
+
+const CJK_RE = /[一-鿿㐀-䶿豈-﫿　-〿＀-￯]/;
+function measureLine(line) {
+  const { ascii, cjk } = getCharWidths();
+  let w = 0;
+  for (const ch of line) {
+    w += CJK_RE.test(ch) ? cjk : ascii;
+  }
+  return w;
+}
+
+// Create a <pre class="json-block"> with unescaped content.
+// Strips leading/trailing { } from JSON-like strings for cleaner display.
+// Uses ResizeObserver to adapt wrap markers to container width.
+function createJsonBlock(content) {
+  const pre = document.createElement("pre");
+  pre.className = "json-block";
+  let rawText = unescapeText(content);
+  rawText = rawText.replace(/^\{\s*/, "").replace(/\s*\}$/, "");
+  pre.dataset.raw = rawText;
+  applyWrapMarkers(pre);
+  const ro = new ResizeObserver(() => applyWrapMarkers(pre));
+  ro.observe(pre);
+  return pre;
+}
+
+function applyWrapMarkers(pre) {
+  const raw = pre.dataset.raw;
+  if (!raw) return;
+  const containerW = pre.clientWidth - 16; // subtract padding
+  if (containerW <= 0) return;
+  const { ascii, cjk } = getCharWidths();
+  const markerW = ascii * 3; // " ↵" approx 3 ascii chars wide
+  const lines = raw.split("\n");
+  const out = [];
+  for (const line of lines) {
+    const lineW = measureLine(line);
+    if (lineW <= containerW) {
+      out.push(line);
+    } else {
+      // Split line by pixel width
+      let w = 0, start = 0;
+      for (let i = 0; i < line.length; i++) {
+        const chW = CJK_RE.test(line[i]) ? cjk : ascii;
+        if (w + chW > containerW - markerW) {
+          out.push(line.slice(start, i) + " ↵");
+          start = i;
+          w = chW;
+        } else {
+          w += chW;
+        }
+      }
+      if (start < line.length) out.push(line.slice(start));
+    }
+  }
+  pre.textContent = out.join("\n");
+}
+
 const AGENT_AVATAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="rgba(125,211,252,0.9)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
   <rect x="3" y="8" width="18" height="11" rx="2"/>
   <path d="M8 8V6a4 4 0 0 1 8 0v2"/>
@@ -1880,9 +2073,10 @@ function isChatNearBottom() {
   return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 80;
 }
 
-function addMessage(role, content) {
+function addMessage(role, content, msgIndex) {
   const div = document.createElement("div");
   div.className = `message ${role}-message`;
+  if (msgIndex !== undefined) div.dataset.msgIndex = String(msgIndex);
 
   const avatar = role === "agent" ? createAgentAvatarEl() : createUserAvatarEl();
   div.appendChild(avatar);
@@ -1891,7 +2085,7 @@ function addMessage(role, content) {
   bubble.className = "message-bubble";
   const inner = document.createElement("div");
   inner.className = "markdown-content";
-  inner.innerHTML = marked.parse(content || "");
+  inner.innerHTML = renderMarkdown(content || "");
   bubble.appendChild(inner);
   div.appendChild(bubble);
 
@@ -1937,30 +2131,24 @@ function renderTimeline(container, timeline, shownPlotPaths = null) {
       details.appendChild(summary);
       const body = document.createElement("div");
       body.className = "markdown-content";
-      body.innerHTML = marked.parse(item.text || "");
+      body.innerHTML = renderMarkdown(item.text || "");
       details.appendChild(body);
       container.appendChild(details);
     } else if (item.type === "function_call") {
       const details = document.createElement("details");
       details.className = "timeline-function-call";
       const summary = document.createElement("summary");
-      summary.textContent = `🔧 ${item.name}`;
+      summary.innerHTML = `<span class="timeline-badge badge-in">IN</span> ${item.name}`;
       details.appendChild(summary);
-      const pre = document.createElement("pre");
-      pre.className = "json-block";
-      pre.textContent = JSON.stringify(item.args, null, 2);
-      details.appendChild(pre);
+      details.appendChild(createJsonBlock(JSON.stringify(item.args, null, 2)));
       container.appendChild(details);
     } else if (item.type === "function_response") {
       const details = document.createElement("details");
       details.className = "timeline-function-response";
       const summary = document.createElement("summary");
-      summary.textContent = `📥 ${item.name}`;
+      summary.innerHTML = `<span class="timeline-badge badge-out">OUT</span> ${item.name}`;
       details.appendChild(summary);
-      const pre = document.createElement("pre");
-      pre.className = "json-block";
-      pre.textContent = JSON.stringify(item.response, null, 2);
-      details.appendChild(pre);
+      details.appendChild(createJsonBlock(JSON.stringify(item.response, null, 2)));
       container.appendChild(details);
       for (const plotPath of getPlotPaths(item.response)) {
         if (
@@ -1990,7 +2178,7 @@ function renderTimeline(container, timeline, shownPlotPaths = null) {
     } else if (item.type === "text") {
       const div = document.createElement("div");
       div.className = "markdown-content";
-      div.innerHTML = marked.parse(item.text || "");
+      div.innerHTML = renderMarkdown(item.text || "");
       container.appendChild(div);
     }
   }
@@ -2001,9 +2189,10 @@ function renderTimeline(container, timeline, shownPlotPaths = null) {
 
 // Create an agent message div with an inner timeline container, append to
 // chatArea, and return the inner container for live updates.
-function addAgentTimelineMessage(timeline, shownPlotPaths = null) {
+function addAgentTimelineMessage(timeline, shownPlotPaths = null, msgIndex) {
   const outer = document.createElement("div");
   outer.className = "message agent-message";
+  if (msgIndex !== undefined) outer.dataset.msgIndex = String(msgIndex);
   outer.appendChild(createAgentAvatarEl());
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
@@ -2036,10 +2225,7 @@ function renderStepInput(input) {
   const summary = document.createElement("summary");
   summary.textContent = "Input";
   details.appendChild(summary);
-  const pre = document.createElement("pre");
-  pre.className = "json-block";
-  pre.textContent = JSON.stringify(input, null, 2);
-  details.appendChild(pre);
+  details.appendChild(createJsonBlock(JSON.stringify(input, null, 2)));
   return details;
 }
 
@@ -2050,10 +2236,7 @@ function renderStepConversationEvent(evt) {
   const icon = evt.type === "thought" ? "💭" : evt.type === "text" ? "💬" : evt.type === "function_call" ? "🔧" : "↩";
   summary.textContent = `${icon} [${evt.author || "step_executor"}] ${evt.type || "event"}`;
   details.appendChild(summary);
-  const pre = document.createElement("pre");
-  pre.className = "json-block";
-  pre.textContent = evt.content || "";
-  details.appendChild(pre);
+  details.appendChild(createJsonBlock(evt.content));
   return details;
 }
 
@@ -2067,16 +2250,11 @@ function renderStepToolCall(tc) {
   summary.textContent = `🔧 ${tc.name || "tool"}${dur}`;
   details.appendChild(summary);
   if (tc.args_summary) {
-    const pre = document.createElement("pre");
-    pre.className = "json-block";
-    pre.textContent = tc.args_summary;
-    details.appendChild(pre);
+    details.appendChild(createJsonBlock(tc.args_summary));
   }
   if (tc.result_summary) {
-    const pre = document.createElement("pre");
-    pre.className = "json-block";
+    const pre = createJsonBlock(`→ ${tc.result_summary}`);
     pre.style.borderTop = "1px solid rgba(255,255,255,0.06)";
-    pre.textContent = `→ ${tc.result_summary}`;
     details.appendChild(pre);
   }
   return details;
@@ -2676,6 +2854,49 @@ async function loadSession(sessionId) {
     // Rebuild chat from server-canonical state
     chatArea.innerHTML = "";
     stepExecutionFeed.reset();
+    let msgIdx = 0;
+
+    // Fetch graph data upfront so we can merge events and step cards
+    // into a single chronological timeline.
+    let graphNodes = [];
+    try {
+      const graphResp = await fetch(`/api/agent-graph/${encodeURIComponent(sessionId)}`);
+      if (graphResp.ok) {
+        const graphData = await graphResp.json();
+        graphNodes = Object.values(graphData.nodes || {})
+          .filter((n) => n.type === "step")
+          .sort((a, b) => {
+            const ta = a.start_time ? new Date(a.start_time).getTime() : Infinity;
+            const tb = b.start_time ? new Date(b.start_time).getTime() : Infinity;
+            return ta - tb;
+          });
+      }
+    } catch (_) {}
+
+    // Build a unified timeline: events and step cards sorted by timestamp.
+    const timeline = [];
+
+    events.forEach((event, idx) => {
+      // ADK event.timestamp is a float in seconds; convert to ms for comparison
+      // with step card start_time (which is an ISO string → ms via Date.getTime).
+      let ts;
+      if (event.timestamp) {
+        const raw = Number(event.timestamp);
+        ts = raw < 1e12 ? raw * 1000 : raw; // seconds → ms if needed
+      } else if (event.createTime) {
+        ts = new Date(event.createTime).getTime();
+      } else {
+        ts = idx;
+      }
+      timeline.push({ type: "event", data: event, ts, order: idx });
+    });
+
+    graphNodes.forEach((node, idx) => {
+      const ts = node.start_time ? new Date(node.start_time).getTime() : Infinity;
+      timeline.push({ type: "step", data: node, ts, order: 1e9 + idx });
+    });
+
+    timeline.sort((a, b) => a.ts - b.ts || a.order - b.order);
 
     // First pass: collect all functionResponses keyed by ID for cross-event matching
     const frById = {};
@@ -2688,34 +2909,41 @@ async function loadSession(sessionId) {
       }
     }
 
-    for (const event of events) {
+    // Process the unified timeline in chronological order
+    for (const item of timeline) {
+      if (item.type === "step") {
+        stepExecutionFeed._upsert(item.data);
+        continue;
+      }
+
+      const event = item.data;
       const role = event.author === "user" ? "user" : "agent";
       const parts = event.content?.parts || [];
 
       if (role === "user") {
         const text = displayMessageFromStoredUserText(parts.map((p) => p.text || "").join(""));
-        if (text) addMessage("user", text);
+        if (text) addMessage("user", text, msgIdx++);
         shownPlotPaths = new Set();
         continue;
       }
 
-      const timeline = [];
+      const evtTimeline = [];
       let accText = "";
 
       for (const p of parts) {
         if (p.thought) {
-          timeline.push({ type: "thought", text: p.text || "" });
+          evtTimeline.push({ type: "thought", text: p.text || "" });
         } else if (getFunctionCall(p)) {
           const fc = getFunctionCall(p);
           const matchedFr = frById[fc.id];
-          timeline.push({
+          evtTimeline.push({
             type: "function_call",
             id: fc.id,
             name: fc.name || "Unknown",
             args: fc.args || {},
           });
           if (matchedFr) {
-            timeline.push({
+            evtTimeline.push({
               type: "function_response",
               id: matchedFr.id,
               name: matchedFr.name || "Unknown",
@@ -2724,11 +2952,11 @@ async function loadSession(sessionId) {
           }
         } else if (getFunctionResponse(p)) {
           const fr = getFunctionResponse(p);
-          const alreadyMatched = timeline.some(
+          const alreadyMatched = evtTimeline.some(
             (t) => t.type === "function_response" && t.id === fr.id
           );
           if (!alreadyMatched) {
-            timeline.push({
+            evtTimeline.push({
               type: "function_response",
               id: fr.id,
               name: fr.name || "Unknown",
@@ -2737,17 +2965,17 @@ async function loadSession(sessionId) {
           }
         } else if (p.text && !p.thought) {
           accText += p.text;
-          const last = timeline[timeline.length - 1];
+          const last = evtTimeline[evtTimeline.length - 1];
           if (last?.type === "text") {
             last.text = accText;
           } else {
-            timeline.push({ type: "text", text: accText });
+            evtTimeline.push({ type: "text", text: accText });
           }
         }
       }
 
-      if (timeline.length > 0) {
-        addAgentTimelineMessage(timeline, shownPlotPaths);
+      if (evtTimeline.length > 0) {
+        addAgentTimelineMessage(evtTimeline, shownPlotPaths, msgIdx++);
       }
     }
 
@@ -2941,14 +3169,17 @@ async function sendMessage(message) {
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
+    let lineBuf = "";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value);
-      const lines = chunk.split("\n");
+      lineBuf += decoder.decode(value, { stream: true });
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop(); // keep the incomplete last line in the buffer
       for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const dataStr = line.slice(6);
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        const dataStr = trimmed.slice(6);
         if (dataStr === "[DONE]") continue;
         try {
           const evt = JSON.parse(dataStr);
@@ -2986,6 +3217,24 @@ async function sendMessage(message) {
         } catch (_) {
           // ignore malformed lines
         }
+      }
+    }
+    // Flush remaining data in the line buffer
+    if (lineBuf.trim().startsWith("data: ")) {
+      const dataStr = lineBuf.trim().slice(6);
+      if (dataStr !== "[DONE]") {
+        try {
+          const evt = JSON.parse(dataStr);
+          const parts = evt?.content?.parts || [];
+          for (const p of parts) {
+            if (p.thought) upsertTimelineThought(timeline, p.text || "");
+            else if (p.functionCall) upsertTimelineEvent(timeline, { type: "function_call", id: p.functionCall.id, name: p.functionCall.name || "Unknown", args: p.functionCall.args || {} });
+            else if (p.functionResponse) upsertTimelineEvent(timeline, { type: "function_response", id: p.functionResponse.id, name: p.functionResponse.name || "Unknown", response: p.functionResponse.response || {} });
+            else if (p.text) { accText = mergeReplayedText(accText, p.text); upsertTimelineText(timeline, compactRepeatedPrefixSnapshots(accText)); }
+            if (timeline.length > 0 && !timelineContainer) timelineContainer = addAgentTimelineMessage(timeline, shownPlotPaths);
+            else if (timelineContainer) renderTimeline(timelineContainer, timeline, shownPlotPaths);
+          }
+        } catch (_) {}
       }
     }
   } catch (err) {
