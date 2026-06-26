@@ -31,6 +31,19 @@ Check the current configuration without revealing secrets:
 matcreator config show
 ```
 
+## Install vite
+For using vite frontend, you need to install it first:
+```bash
+cd web/vite-frontend
+npm install
+````
+Make sure your system has node.js installed before installing vite.
+
+Check vite installation with:
+```bash
+npx vite --version
+```
+
 ## Start the CLI
 
 Start an interactive session in the current project workspace:
