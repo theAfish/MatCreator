@@ -4,7 +4,7 @@ These tests focus on port configuration scenarios that are specific to the
 web layer (``web/main.py``), such as combined port scenarios and restart
 command format invariants.  General port resolution tests (defaults,
 env overrides, config.yaml fallback, precedence, legacy alias, invalid
-ports, MCP URLs, frozen dataclass) live in ``tests/test_ports_config.py``.
+ports, frozen dataclass) live in ``tests/test_ports_config.py``.
 
 Key assertions:
   - The restart command (``get_local_adk_command()``) has a stable format

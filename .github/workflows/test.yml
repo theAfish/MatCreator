@@ -32,7 +32,6 @@ jobs:
             tests/test_ports_config.py \
             tests/test_matcreator_cli_ports.py \
             tests/test_web_ports.py \
-            tests/test_mcp_ports.py \
             tests/test_compose_ports.py \
             tests/test_vite_config_ports.py \
             -v

@@ -12,7 +12,6 @@ from src.matcreator.ports import (
     get_adk_port,
     get_frontend_port,
     get_local_adk_command,
-    get_mcp_endpoint_url,
     get_server_proxy_port,
     get_web_port,
     get_worker_base_port,
@@ -67,19 +66,6 @@ def test_default_worker_base_port(monkeypatch) -> None:
     clear_port_env_vars(monkeypatch)
     assert get_worker_base_port() == 9001
 
-
-def test_default_mcp_ports(monkeypatch) -> None:
-    """MCP default ports: database=50001, dpa=50002, abacus=50003,
-    structure=50004, vasp=50005, mattergen=50006."""
-    clear_port_env_vars(monkeypatch)
-    assert get_mcp_endpoint_url("database") == "http://localhost:50001/sse"
-    assert get_mcp_endpoint_url("dpa") == "http://localhost:50002/sse"
-    assert get_mcp_endpoint_url("abacus") == "http://localhost:50003/sse"
-    assert get_mcp_endpoint_url("structure") == "http://localhost:50004/sse"
-    assert get_mcp_endpoint_url("vasp") == "http://localhost:50005/sse"
-    assert get_mcp_endpoint_url("mattergen") == "http://localhost:50006/sse"
-
-
 # ===================================================================
 # Environment variable overrides
 # ===================================================================
@@ -119,25 +105,6 @@ def test_env_override_worker_base_port(monkeypatch) -> None:
     monkeypatch.setenv("MATCREATOR_WORKER_BASE_PORT", "9100")
     assert get_worker_base_port() == 9100
 
-
-def test_env_override_mcp_ports(monkeypatch) -> None:
-    """MCP port env vars override defaults."""
-    clear_port_env_vars(monkeypatch)
-    monkeypatch.setenv("MATCREATOR_MCP_DATABASE_PORT", "51001")
-    monkeypatch.setenv("MATCREATOR_MCP_DPA_PORT", "51002")
-    monkeypatch.setenv("MATCREATOR_MCP_ABACUS_PORT", "51003")
-    monkeypatch.setenv("MATCREATOR_MCP_STRUCTURE_PORT", "51004")
-    monkeypatch.setenv("MATCREATOR_MCP_VASP_PORT", "51005")
-    monkeypatch.setenv("MATCREATOR_MCP_MATTERGEN_PORT", "51006")
-
-    assert get_mcp_endpoint_url("database") == "http://localhost:51001/sse"
-    assert get_mcp_endpoint_url("dpa") == "http://localhost:51002/sse"
-    assert get_mcp_endpoint_url("abacus") == "http://localhost:51003/sse"
-    assert get_mcp_endpoint_url("structure") == "http://localhost:51004/sse"
-    assert get_mcp_endpoint_url("vasp") == "http://localhost:51005/sse"
-    assert get_mcp_endpoint_url("mattergen") == "http://localhost:51006/sse"
-
-
 # ===================================================================
 # Config file fallback
 # ===================================================================
@@ -156,11 +123,6 @@ def test_config_yaml_fallback(tmp_path: Path, monkeypatch) -> None:
             "frontend": 5180,
             "server_proxy": 8080,
             "worker_base": 9100,
-            "mcp_host": "config.host",
-            "mcp": {
-                "database": 51001,
-                "dpa": 51002,
-            },
         },
     )
 
@@ -170,9 +132,6 @@ def test_config_yaml_fallback(tmp_path: Path, monkeypatch) -> None:
     assert config.frontend == 5180
     assert config.server_proxy == 8080
     assert config.worker_base == 9100
-    assert config.mcp_host == "config.host"
-    assert config.mcp_database == 51001
-    assert config.mcp_dpa == 51002
 
 
 # ===================================================================
@@ -265,50 +224,6 @@ def test_invalid_port_too_large(monkeypatch) -> None:
 
 
 # ===================================================================
-# get_mcp_endpoint_url
-# ===================================================================
-
-
-def test_mcp_endpoint_url_defaults(monkeypatch) -> None:
-    """Default MCP endpoint URLs."""
-    clear_port_env_vars(monkeypatch)
-    assert get_mcp_endpoint_url("database") == "http://localhost:50001/sse"
-    assert get_mcp_endpoint_url("dpa") == "http://localhost:50002/sse"
-    assert get_mcp_endpoint_url("abacus") == "http://localhost:50003/sse"
-    assert get_mcp_endpoint_url("structure") == "http://localhost:50004/sse"
-    assert get_mcp_endpoint_url("vasp") == "http://localhost:50005/sse"
-    assert get_mcp_endpoint_url("mattergen") == "http://localhost:50006/sse"
-
-
-def test_mcp_endpoint_url_with_custom_host(monkeypatch) -> None:
-    """MATCREATOR_MCP_HOST env var changes host in all URLs."""
-    clear_port_env_vars(monkeypatch)
-    monkeypatch.setenv("MATCREATOR_MCP_HOST", "host.docker.internal")
-    assert get_mcp_endpoint_url("vasp") == "http://host.docker.internal:50005/sse"
-
-
-def test_mcp_endpoint_url_with_custom_port(monkeypatch) -> None:
-    """Individual port env var overrides port in URL."""
-    clear_port_env_vars(monkeypatch)
-    monkeypatch.setenv("MATCREATOR_MCP_VASP_PORT", "51005")
-    assert get_mcp_endpoint_url("vasp") == "http://localhost:51005/sse"
-
-
-def test_mcp_endpoint_url_full_override(monkeypatch) -> None:
-    """Full URL env var overrides host+port construction."""
-    clear_port_env_vars(monkeypatch)
-    monkeypatch.setenv("MATCREATOR_MCP_DATABASE_URL", "http://custom:9999/sse")
-    assert get_mcp_endpoint_url("database") == "http://custom:9999/sse"
-
-
-def test_mcp_endpoint_url_unknown_name(monkeypatch) -> None:
-    """Unknown endpoint name raises ValueError."""
-    clear_port_env_vars(monkeypatch)
-    with pytest.raises(ValueError):
-        get_mcp_endpoint_url("nonexistent")
-
-
-# ===================================================================
 # get_local_adk_command
 # ===================================================================
 
@@ -353,16 +268,9 @@ def test_ports_config_dataclass(monkeypatch, tmp_path: Path) -> None:
     assert config.frontend == 5173
     assert config.server_proxy == 80
     assert config.worker_base == 9001
-    assert config.mcp_host == "localhost"
     assert config.adk_host == "127.0.0.1"
     assert config.web_host == "127.0.0.1"
     assert config.frontend_host == "127.0.0.1"
-    assert config.mcp_database == 50001
-    assert config.mcp_dpa == 50002
-    assert config.mcp_abacus == 50003
-    assert config.mcp_structure == 50004
-    assert config.mcp_vasp == 50005
-    assert config.mcp_mattergen == 50006
 
     # Verify frozen — assignment must raise FrozenInstanceError
     with pytest.raises(FrozenInstanceError):
@@ -384,13 +292,11 @@ def test_config_path_from_matcreator_home(tmp_path: Path, monkeypatch) -> None:
         {
             "adk": 8300,
             "web": 8301,
-            "mcp_host": "remote.host",
         },
     )
 
     config = load_ports_config()
     assert config.adk == 8300
     assert config.web == 8301
-    assert config.mcp_host == "remote.host"
     # Fields not in config fall back to defaults
     assert config.frontend == 5173
