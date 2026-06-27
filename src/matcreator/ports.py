@@ -22,17 +22,9 @@ The ``ports`` section of the YAML file is read:
       frontend: 5174
       server_proxy: 8080
       worker_base: 9101
-      mcp_host: localhost
       adk_host: 0.0.0.0
       web_host: 0.0.0.0
       frontend_host: 0.0.0.0
-      mcp:
-        database: 51001
-        dpa: 51002
-        abacus: 51003
-        structure: 51004
-        vasp: 51005
-        mattergen: 51006
 
 Legacy alias
 ------------
@@ -59,13 +51,6 @@ _DEFAULTS: dict[str, int | str] = {
     "frontend": 5173,
     "server_proxy": 80,
     "worker_base": 9001,
-    "mcp_host": "localhost",
-    "mcp_database": 50001,
-    "mcp_dpa": 50002,
-    "mcp_abacus": 50003,
-    "mcp_structure": 50004,
-    "mcp_vasp": 50005,
-    "mcp_mattergen": 50006,
     "adk_host": "127.0.0.1",
     "web_host": "127.0.0.1",
     "frontend_host": "127.0.0.1",
@@ -81,43 +66,15 @@ _ENV_VAR_MAP: dict[str, str] = {
     "frontend": "MATCREATOR_FRONTEND_PORT",
     "server_proxy": "MATCREATOR_SERVER_PROXY_PORT",
     "worker_base": "MATCREATOR_WORKER_BASE_PORT",
-    "mcp_host": "MATCREATOR_MCP_HOST",
-    "mcp_database": "MATCREATOR_MCP_DATABASE_PORT",
-    "mcp_dpa": "MATCREATOR_MCP_DPA_PORT",
-    "mcp_abacus": "MATCREATOR_MCP_ABACUS_PORT",
-    "mcp_structure": "MATCREATOR_MCP_STRUCTURE_PORT",
-    "mcp_vasp": "MATCREATOR_MCP_VASP_PORT",
-    "mcp_mattergen": "MATCREATOR_MCP_MATTERGEN_PORT",
     "adk_host": "MATCREATOR_ADK_HOST",
     "web_host": "MATCREATOR_WEB_HOST",
     "frontend_host": "MATCREATOR_FRONTEND_HOST",
-}
-
-# Full URL overrides for MCP endpoints (endpoint name -> env var name)
-_MCP_URL_ENV_MAP: dict[str, str] = {
-    "database": "MATCREATOR_MCP_DATABASE_URL",
-    "dpa": "MATCREATOR_MCP_DPA_URL",
-    "abacus": "MATCREATOR_MCP_ABACUS_URL",
-    "structure": "MATCREATOR_MCP_STRUCTURE_URL",
-    "vasp": "MATCREATOR_MCP_VASP_URL",
-    "mattergen": "MATCREATOR_MCP_MATTERGEN_URL",
 }
 
 # Legacy aliases: primary env var name -> legacy env var name
 _LEGACY_ENV_MAP: dict[str, str] = {
     "MATCREATOR_ADK_PORT": "ADK_LOCAL_PORT",
 }
-
-# Mapping from MCP endpoint name to the port config attribute key
-_MCP_NAME_TO_PORT_KEY: dict[str, str] = {
-    "database": "mcp_database",
-    "dpa": "mcp_dpa",
-    "abacus": "mcp_abacus",
-    "structure": "mcp_structure",
-    "vasp": "mcp_vasp",
-    "mattergen": "mcp_mattergen",
-}
-
 
 # ---------------------------------------------------------------------------
 # Config file helpers
@@ -152,7 +109,7 @@ def _read_yaml_config() -> dict[str, Any]:
 def _get_config_file_value(key: str) -> Any:
     """Return a value from the ``ports`` section of the config file.
 
-    *key* may be a dotted path such as ``"mcp.database"`` to reach nested dicts.
+    *key* may be a dotted path such as ``"section.field"`` to reach nested dicts.
     Returns ``None`` when the key is absent.
     """
     cfg = _read_yaml_config()
@@ -256,9 +213,9 @@ def _resolve_port_value(name: str, config_file_key: str) -> int:
     """Resolve a single port value using env > config file > default.
 
     Args:
-        name: Internal key name (e.g. ``"adk"``, ``"mcp_database"``).
+        name: Internal key name (e.g. ``"adk"``, ``"web"``).
         config_file_key: Dotted key within the ``ports`` section of config.yaml
-            (e.g. ``"mcp.database"``).
+            (e.g. ``"adk"``).
 
     Returns:
         The resolved port number as an :class:`int`.
@@ -284,7 +241,7 @@ def _resolve_port_value(name: str, config_file_key: str) -> int:
 
 
 def _resolve_string_value(name: str, config_file_key: str) -> str:
-    """Resolve a string config value (e.g. ``mcp_host``) using env > config > default.
+    """Resolve a string config value using env > config > default.
 
     For host-like values the result is validated by :func:`_validate_host`.
     """
@@ -315,9 +272,8 @@ class PortsConfig:
     """Immutable snapshot of all resolved port configuration values.
 
     Integer port fields are validated to be in the range 1–65535.
-    Host string fields (``mcp_host``, ``adk_host``, ``web_host``,
-    ``frontend_host``) are validated to be non-empty and free of
-    illegal characters.
+    Host string fields (``adk_host``, ``web_host``, ``frontend_host``)
+    are validated to be non-empty and free of illegal characters.
     """
 
     adk: int
@@ -335,9 +291,6 @@ class PortsConfig:
     worker_base: int
     """Worker base port for host-port allocation (default: 9001)."""
 
-    mcp_host: str
-    """Hostname or IP used to construct MCP endpoint URLs (default: localhost)."""
-
     adk_host: str
     """Binding host for the ADK API server (default: 127.0.0.1)."""
 
@@ -346,24 +299,6 @@ class PortsConfig:
 
     frontend_host: str
     """Binding host for the Vite frontend dev-server (default: 127.0.0.1)."""
-
-    mcp_database: int
-    """Database MCP server port (default: 50001)."""
-
-    mcp_dpa: int
-    """DPA MCP server port (default: 50002)."""
-
-    mcp_abacus: int
-    """ABACUS MCP server port (default: 50003)."""
-
-    mcp_structure: int
-    """Structure MCP server port (default: 50004)."""
-
-    mcp_vasp: int
-    """VASP MCP server port (default: 50005)."""
-
-    mcp_mattergen: int
-    """MatterGen MCP server port (default: 50006)."""
 
 
 # ---------------------------------------------------------------------------
@@ -383,16 +318,9 @@ def load_ports_config() -> PortsConfig:
         frontend=_resolve_port_value("frontend", "frontend"),
         server_proxy=_resolve_port_value("server_proxy", "server_proxy"),
         worker_base=_resolve_port_value("worker_base", "worker_base"),
-        mcp_host=_resolve_string_value("mcp_host", "mcp_host"),
         adk_host=_resolve_string_value("adk_host", "adk_host"),
         web_host=_resolve_string_value("web_host", "web_host"),
         frontend_host=_resolve_string_value("frontend_host", "frontend_host"),
-        mcp_database=_resolve_port_value("mcp_database", "mcp.database"),
-        mcp_dpa=_resolve_port_value("mcp_dpa", "mcp.dpa"),
-        mcp_abacus=_resolve_port_value("mcp_abacus", "mcp.abacus"),
-        mcp_structure=_resolve_port_value("mcp_structure", "mcp.structure"),
-        mcp_vasp=_resolve_port_value("mcp_vasp", "mcp.vasp"),
-        mcp_mattergen=_resolve_port_value("mcp_mattergen", "mcp.mattergen"),
     )
 
 
@@ -434,46 +362,6 @@ def get_web_host() -> str:
 def get_frontend_host() -> str:
     """Return the resolved binding host for the Vite frontend dev-server."""
     return _resolve_string_value("frontend_host", "frontend_host")
-
-
-def get_mcp_endpoint_url(name: str) -> str:
-    """Build the SSE endpoint URL for a named MCP server.
-
-    Supported names: ``database``, ``dpa``, ``abacus``, ``structure``, ``vasp``,
-    ``mattergen``.
-
-    If a full URL override environment variable (e.g.
-    ``MATCREATOR_MCP_DATABASE_URL``) is set, that value is returned directly.
-    Otherwise the URL is constructed as ``http://{host}:{port}/sse`` using the
-    resolved host and port values.
-
-    Args:
-        name: The MCP endpoint name (case-sensitive).
-
-    Returns:
-        The full SSE endpoint URL string.
-
-    Raises:
-        ValueError: If *name* is not a recognised MCP endpoint.
-    """
-    if name not in _MCP_NAME_TO_PORT_KEY:
-        raise ValueError(
-            f"Unknown MCP endpoint name {name!r}. "
-            f"Expected one of: {', '.join(sorted(_MCP_NAME_TO_PORT_KEY))}."
-        )
-
-    # Full URL override via env var takes highest precedence
-    url_env = _MCP_URL_ENV_MAP.get(name)
-    if url_env:
-        url_value = os.environ.get(url_env)
-        if url_value is not None:
-            return url_value
-
-    # Construct URL from host + port
-    host = _resolve_string_value("mcp_host", "mcp_host")
-    port_key = _MCP_NAME_TO_PORT_KEY[name]
-    port = _resolve_port_value(port_key, f"mcp.{name}")
-    return f"http://{host}:{port}/sse"
 
 
 def get_local_adk_command(host: str | None = None) -> list[str]:

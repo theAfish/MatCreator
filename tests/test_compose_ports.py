@@ -57,26 +57,6 @@ def test_docker_compose_has_env_var_ports() -> None:
     )
 
 
-def test_docker_compose_has_mcp_env_vars() -> None:
-    """docker-compose.yml must contain MCP port environment variables."""
-    content = _read_compose_file("docker-compose.yml")
-
-    # Verify MCP-related environment variables are present
-    mcp_vars = [
-        "MATCREATOR_MCP_HOST",
-        "MATCREATOR_MCP_DATABASE_PORT",
-        "MATCREATOR_MCP_DPA_PORT",
-        "MATCREATOR_MCP_ABACUS_PORT",
-        "MATCREATOR_MCP_STRUCTURE_PORT",
-        "MATCREATOR_MCP_VASP_PORT",
-        "MATCREATOR_MCP_MATTERGEN_PORT",
-    ]
-    for var in mcp_vars:
-        assert var in content, (
-            f"docker-compose.yml should contain MCP env var: {var}"
-        )
-
-
 # ===================================================================
 # docker-compose.server.yml tests
 # ===================================================================
