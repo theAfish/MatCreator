@@ -1,6 +1,9 @@
 """Lightweight FastAPI server that exposes agent graph data to the frontend.
 
-Runs on port 8001 alongside the ADK backend (port 8000).
+Runs alongside the ADK backend.  Ports are resolved via
+:func:`~matcreator.ports.get_web_port` and
+:func:`~matcreator.ports.get_adk_port` at call time
+(env vars > config.yaml > defaults).
 
 Endpoints
 ---------
@@ -82,6 +85,7 @@ from matcreator.config import ENV_TO_YAML, YAML_TO_ENV, SENSITIVE_YAML_KEYS  # n
 from matcreator.constants import GRAPH_AGENT_MODEL  # noqa: E402
 from matcreator.knowledge.query import _get_kg  # noqa: E402
 from matcreator.knowledge.review import run_review_pipeline  # noqa: E402
+from matcreator.ports import get_adk_port, get_local_adk_command, get_web_port, get_worker_base_port  # noqa: E402
 
 app = FastAPI(title="MatCreator Graph API", version="1.0.0")
 APP_NAME = "MatCreator"
@@ -177,11 +181,11 @@ def _runtime_env_value(env_key: str) -> str:
 # API server.  The control plane (this process) proxies /run_sse and /apps/*
 # to the correct worker and manages the container lifecycle.
 
-_ADK_LOCAL_PORT = int(os.environ.get("ADK_LOCAL_PORT", "8000"))
+# _ADK_LOCAL_PORT is resolved at call time via get_adk_port() (env > config.yaml > default).
 _WORKER_IMAGE = os.environ.get("MATCREATOR_WORKER_IMAGE", "matcreator:latest")
 _WORKER_NETWORK = os.environ.get("MATCREATOR_WORKER_NETWORK", "matcreator-net")
 _WORKER_CONNECT_MODE = os.environ.get("MATCREATOR_WORKER_CONNECT_MODE", "network").lower()
-_WORKER_BASE_PORT = int(os.environ.get("MATCREATOR_WORKER_BASE_PORT", "9001"))
+_WORKER_BASE_PORT = get_worker_base_port()
 _WORKER_IDLE_TIMEOUT_SECONDS = int(os.environ.get("MATCREATOR_WORKER_IDLE_TIMEOUT_SECONDS", "0"))
 _WORKER_MEM_LIMIT = os.environ.get("MATCREATOR_WORKER_MEM_LIMIT", "")
 _WORKER_CPUS = os.environ.get("MATCREATOR_WORKER_CPUS", "")
@@ -222,7 +226,7 @@ def _worker_target_url(user_id: str, port: int | None = None) -> str:
         if port is None:
             raise RuntimeError("host-port worker routing requires a host port")
         return f"http://127.0.0.1:{port}"
-    return f"http://{_worker_container_name(user_id)}:8000"
+    return f"http://{_worker_container_name(user_id)}:{get_adk_port()}"
 
 
 def _iter_session_db_paths(user_id: str | None = None):
@@ -326,7 +330,7 @@ def ensure_worker_running(user_id: str) -> str:
             c = dc.containers.get(name)
             port = None
             if _WORKER_CONNECT_MODE == "host-port":
-                bindings = c.ports.get("8000/tcp") or []
+                bindings = c.ports.get(f"{get_adk_port()}/tcp") or []
                 if not bindings:
                     c.remove(force=True)
                     c = None
@@ -353,9 +357,10 @@ def ensure_worker_running(user_id: str) -> str:
         env_vars["MATCREATOR_MODE"] = "server"
         env_vars["MATCREATOR_USER_ID"] = user_id
 
+        adk_port = get_adk_port()
         run_kwargs: dict = dict(
             image=_WORKER_IMAGE,
-            command=["matcreator", "api-server", "--host", "0.0.0.0", "--port", "8000"],
+            command=["matcreator", "api-server", "--host", "0.0.0.0", "--port", str(adk_port)],
             name=name,
             environment=env_vars,
             volumes={
@@ -368,7 +373,7 @@ def ensure_worker_running(user_id: str) -> str:
             restart_policy={"Name": "unless-stopped"},
         )
         if port is not None:
-            run_kwargs["ports"] = {"8000/tcp": port}
+            run_kwargs["ports"] = {f"{adk_port}/tcp": port}
         if _WORKER_NETWORK:
             run_kwargs["network"] = _WORKER_NETWORK
         if _WORKER_MEM_LIMIT:
@@ -454,7 +459,7 @@ def _extract_user_id_from_adk_path(path: str) -> str:
 async def _adk_target_url(request: Request, adk_path: str = "") -> str:
     """Return the ADK base URL to proxy to, starting a worker if needed."""
     if _MATCREATOR_MODE != "server":
-        return f"http://127.0.0.1:{_ADK_LOCAL_PORT}"
+        return f"http://127.0.0.1:{get_adk_port()}"
 
     # Determine user_id from query string, ADK URL path, or request body.
     user_id = request.query_params.get("user_id", "") or _extract_user_id_from_adk_path(adk_path)
@@ -475,7 +480,9 @@ async def _adk_target_url(request: Request, adk_path: str = "") -> str:
 
 
 
-def _is_port_open(host: str = "127.0.0.1", port: int = 8000) -> bool:
+def _is_port_open(host: str = "127.0.0.1", port: int | None = None) -> bool:
+    if port is None:
+        port = get_adk_port()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex((host, port)) == 0
@@ -2050,7 +2057,7 @@ async def restart_backend(user_id: str = Query(default="")) -> JSONResponse:
     """Restart the ADK backend.
 
     In server mode: restart the user's worker container.
-    In local mode: kill and relaunch the local ADK process on port 8000.
+    In local mode: kill and relaunch the local ADK process on the configured port.
     """
     global _adk_process
 
@@ -2072,12 +2079,12 @@ async def restart_backend(user_id: str = Query(default="")) -> JSONResponse:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
-    _kill_port(8000)
+    _kill_port(get_adk_port())
     await asyncio.sleep(1.5)
 
     try:
         _adk_process = subprocess.Popen(
-            ["matcreator", "api-server"],
+            get_local_adk_command(),
             cwd=str(ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2095,7 +2102,7 @@ async def get_backend_status(user_id: str = Query(default="")) -> JSONResponse:
     """Check whether the ADK backend is reachable.
 
     In server mode: checks the user's worker container port.
-    In local mode: checks localhost:8000.
+    In local mode: checks the configured ADK port on localhost.
     """
     if _MATCREATOR_MODE == "server" and user_id:
         with _worker_registry_lock:
@@ -2109,7 +2116,7 @@ async def get_backend_status(user_id: str = Query(default="")) -> JSONResponse:
         except httpx.HTTPError:
             return JSONResponse({"ready": False})
 
-    return JSONResponse({"ready": _is_port_open(port=_ADK_LOCAL_PORT)})
+    return JSONResponse({"ready": _is_port_open(port=get_adk_port())})
 
 
 # Serve built frontend in production
@@ -2121,4 +2128,4 @@ if _dist.exists():
 if __name__ == "__main__":
     import uvicorn
     host = "0.0.0.0" if _MATCREATOR_MODE == "server" else "127.0.0.1"
-    uvicorn.run(app, host=host, port=8001)
+    uvicorn.run(app, host=host, port=get_web_port())

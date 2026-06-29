@@ -404,6 +404,10 @@ body {
   border-color: rgba(16, 185, 129, 0.24);
 }
 
+.step-feed-live-region {
+  display: block;
+}
+
 .step-feed-highlight .message-bubble {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.22), 0 10px 30px rgba(125, 211, 252, 0.14);
@@ -449,6 +453,27 @@ body {
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.step-feed-stop-btn {
+  border: 1px solid rgba(248, 113, 113, 0.42);
+  background: rgba(248, 113, 113, 0.10);
+  color: #fecaca;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.step-feed-stop-btn:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.18);
+}
+
+.step-feed-stop-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .step-feed-body {

@@ -263,7 +263,7 @@ async def run_bash(script: str, tool_context: ToolContext) -> str:
         if session_id:
             cwd = str(get_session_workdir(session_id))
     proc = await asyncio.create_subprocess_exec(
-        "bash", "-c", script,
+        "bash", "-lc", script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
@@ -386,7 +386,7 @@ async def run_skill_script(
     else:
         cmd = f"bash {script_path} {args}"
     proc = await asyncio.create_subprocess_exec(
-        "bash", "-c", cmd,
+        "bash", "-lc", cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,

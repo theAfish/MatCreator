@@ -65,3 +65,51 @@ Logs are written to `~/.matcreator/logs/{api-server,web-main,vite}.log` by defau
 | ADK sessions and graph database | `~/.matcreator/.adk/` |
 | Workspace artifacts | selected `--workspace` directory |
 | Local logs | `~/.matcreator/logs/` |
+
+## Port Configuration
+
+MatCreator services use these default ports:
+
+| Service | Default Port | Environment Variable |
+|---------|-------------|---------------------|
+| ADK API Server | 8000 | `MATCREATOR_ADK_PORT` |
+| FastAPI Middle Layer | 8001 | `MATCREATOR_WEB_PORT` |
+| Vite Frontend | 5173 | `MATCREATOR_FRONTEND_PORT` |
+
+To change ports, set environment variables before starting:
+
+```bash
+export MATCREATOR_ADK_PORT=8100
+export MATCREATOR_WEB_PORT=8101
+export MATCREATOR_FRONTEND_PORT=5174
+bash script/start_matcreator.sh
+```
+
+### Running alongside Hermes (or other agent systems)
+
+If you need to avoid port conflicts with Hermes or other local services, configure alternative ports:
+
+```bash
+MATCREATOR_ADK_PORT=8100
+MATCREATOR_WEB_PORT=8101
+MATCREATOR_FRONTEND_PORT=5174
+bash script/start_matcreator.sh
+```
+
+Ports can also be persisted in `~/.matcreator/config.yaml`:
+
+```yaml
+ports:
+  adk: 8100
+  web: 8101
+  frontend: 5174
+```
+
+Or via CLI:
+
+```bash
+matcreator config set ports.adk=8100
+matcreator config set ports.web=8101
+```
+
+Port configuration precedence: environment variables > ~/.matcreator/config.yaml > defaults.

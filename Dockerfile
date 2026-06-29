@@ -24,6 +24,19 @@ COPY . .
 # Build the production frontend bundle (served as static files by web/main.py)
 RUN cd web/vite-frontend && npm run build
 
+# Install debian dependencies
+RUN apt-get update && apt-get install -y procps && rm -rf /var/lib/apt/lists/*
+
+# Optional: bake the repo-local VASP POTCAR library into the image and configure pymatgen.
+# Uncomment these lines only if your deployment is allowed to package POTCAR files in the image.
+# COPY PATH_TO_POT /opt/vasp/POT_GGA_PAW_PBE
+# ENV PMG_VASP_PSP_DIR=/opt/vasp/POT_GGA_PAW_PBE
+# RUN pmg config --add PMG_VASP_PSP_DIR "$PMG_VASP_PSP_DIR"
+
+# Run the bohrctl installation script if you need to submit jobs to a Bohr cluster. Uncomment the following line if you need it.
+# RUN curl -fsSL https://dp-public.oss-cn-beijing.aliyuncs.com/bohrctl/1.0.0/install_bohr_linux_curl.sh | bash
+
+
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000 8001 5173
 CMD ["bash", "script/start_matcreator.sh"]

@@ -541,13 +541,13 @@ class AgentGraphView {
     const actionsRow = document.getElementById("detail-actions-row");
     const stopStepBtn = document.getElementById("detail-stop-step-btn");
     const stepNumber = raw.input && raw.input.step_number;
-    if (raw.type === "step" && raw.status === "running" && stepNumber) {
+    if (raw.type === "step" && raw.status === "running" && stepNumber !== undefined && stepNumber !== null) {
       stopStepBtn.disabled = false;
       stopStepBtn.textContent = "Stop step";
-      stopStepBtn.onclick = () => {
-        fetch(`/api/sessions/${state.sessionId}/cancel-step/${stepNumber}`, { method: "POST" }).catch(() => {});
+      stopStepBtn.onclick = async () => {
         stopStepBtn.disabled = true;
         stopStepBtn.textContent = "Stopping…";
+        await requestStepCancellation(stepNumber);
       };
       actionsRow.style.display = "";
     } else {
@@ -656,6 +656,9 @@ class StepExecutionFeed {
     this._userOpen = new Map();
     this._nestedOpen = new Map();
     this._highlightedId = null;
+    this._liveAnchorEl = null;
+    this._liveContainerEl = null;
+    this._liveStartedAt = null;
   }
 
   reset() {
@@ -663,12 +666,39 @@ class StepExecutionFeed {
     this._userOpen.clear();
     this._nestedOpen.clear();
     this._highlightedId = null;
+    this._liveAnchorEl = null;
+    this._liveContainerEl = null;
+    this._liveStartedAt = null;
+  }
+
+  startLiveTurn(anchorEl, startedAt = Date.now()) {
+    this._liveAnchorEl = anchorEl || null;
+    this._liveStartedAt = startedAt;
+    this._liveContainerEl = document.createElement("div");
+    this._liveContainerEl.className = "step-feed-live-region";
+    this._liveContainerEl.dataset.stepLiveRegion = "true";
+
+    if (anchorEl && anchorEl.parentNode === chatArea) {
+      chatArea.insertBefore(this._liveContainerEl, anchorEl.nextSibling);
+    } else {
+      chatArea.appendChild(this._liveContainerEl);
+    }
+
+    return this._liveContainerEl;
+  }
+
+  finishLiveTurn() {
+    this._liveAnchorEl = null;
+    this._liveContainerEl = null;
+    this._liveStartedAt = null;
   }
 
   update(graphData) {
     if (!graphData || typeof graphData.nodes !== "object") return;
+    const liveContainer = this._activeLiveContainer();
     const steps = Object.values(graphData.nodes)
       .filter((node) => node.type === "step")
+      .filter((node) => !liveContainer || this._isLiveStep(node))
       .sort((a, b) => {
         const ta = a.start_time ? new Date(a.start_time).getTime() : Infinity;
         const tb = b.start_time ? new Date(b.start_time).getTime() : Infinity;
@@ -688,6 +718,19 @@ class StepExecutionFeed {
     if (shouldStick) scrollToBottom();
   }
 
+  _activeLiveContainer() {
+    return this._liveContainerEl && chatArea.contains(this._liveContainerEl)
+      ? this._liveContainerEl
+      : null;
+  }
+
+  _isLiveStep(node) {
+    if (!this._liveStartedAt) return true;
+    if (!node.start_time) return node.status === "running";
+    const startedAt = new Date(node.start_time).getTime();
+    return Number.isFinite(startedAt) && startedAt >= this._liveStartedAt - 2000;
+  }
+
   highlight(nodeId) {
     this._highlightedId = nodeId;
     for (const [id, card] of this._cards.entries()) {
@@ -702,16 +745,59 @@ class StepExecutionFeed {
 
   _upsert(node) {
     let outer = this._cards.get(node.id);
+    const nextSortTime = this._stepSortTime(node);
     if (!outer || !chatArea.contains(outer)) {
       outer = this._createCard(node);
       this._cards.set(node.id, outer);
-      this._insertSorted(outer, node);
+      this._placeCard(outer, node);
+    } else if (state.isSending || outer.dataset.stepStartTime !== String(nextSortTime)) {
+      this._placeCard(outer, node);
     }
     this._renderCard(outer, node);
   }
 
+  appendStatic(node, container = chatArea) {
+    let outer = this._cards.get(node.id);
+    if (!outer || !container.contains(outer)) {
+      outer = this._createCard(node);
+      this._cards.set(node.id, outer);
+    }
+    outer.dataset.stepStartTime = String(this._stepSortTime(node));
+    container.appendChild(outer);
+    this._renderCard(outer, node);
+    return outer;
+  }
+
+  _placeCard(outer, node) {
+    const liveContainer = this._activeLiveContainer();
+    if (liveContainer) {
+      this._insertIntoLiveContainer(liveContainer, outer, node);
+      return;
+    }
+    this._insertSorted(outer, node);
+  }
+
+  _stepSortTime(node) {
+    return node.start_time ? new Date(node.start_time).getTime() : Infinity;
+  }
+
+  _insertIntoLiveContainer(container, outer, node) {
+    const newTime = this._stepSortTime(node);
+    outer.dataset.stepStartTime = String(newTime);
+
+    for (const el of [...container.children]) {
+      if (el === outer) continue;
+      if (!el.dataset.stepStartTime) continue;
+      if (newTime < Number(el.dataset.stepStartTime)) {
+        container.insertBefore(outer, el);
+        return;
+      }
+    }
+    container.appendChild(outer);
+  }
+
   _insertSorted(outer, node) {
-    const newTime = node.start_time ? new Date(node.start_time).getTime() : Infinity;
+    const newTime = this._stepSortTime(node);
     outer.dataset.stepStartTime = String(newTime);
 
     // Walk all chat children to find the right insertion point.
@@ -719,10 +805,18 @@ class StepExecutionFeed {
     // - User/agent messages: track as anchor, but reset when a step card is
     //   found after them (so we insert after the most recent step card too).
     const children = [...chatArea.children];
-    let insertAfter = null; // element to insert after (null = before first child)
+    const liveAnchor = this._liveAnchorEl && chatArea.contains(this._liveAnchorEl)
+      ? this._liveAnchorEl
+      : null;
+    let insertAfter = liveAnchor; // element to insert after (null = before first child)
+    let passedLiveAnchor = !liveAnchor;
 
     for (const el of children) {
       if (el === outer) continue;
+      if (liveAnchor && !passedLiveAnchor) {
+        if (el === liveAnchor) passedLiveAnchor = true;
+        continue;
+      }
 
       if (el.dataset.stepStartTime) {
         const elTime = Number(el.dataset.stepStartTime);
@@ -740,6 +834,16 @@ class StepExecutionFeed {
       } else if (el.dataset.msgIndex !== undefined) {
         // User/agent message — update anchor
         insertAfter = el;
+      } else if (el.classList.contains("user-message")) {
+        // Live messages have no msgIndex until the session is reloaded.
+        insertAfter = el;
+      } else if (
+        insertAfter &&
+        el.classList.contains("agent-message") &&
+        !el.classList.contains("step-feed-message")
+      ) {
+        chatArea.insertBefore(outer, el);
+        return;
       }
     }
 
@@ -808,6 +912,23 @@ class StepExecutionFeed {
     meta.className = "step-feed-meta";
     meta.textContent = formatStepDuration(node);
     summary.append(title, badge, meta);
+
+    const stepNumber = node.input && node.input.step_number;
+    if (node.status === "running" && stepNumber !== undefined && stepNumber !== null) {
+      const stopBtn = document.createElement("button");
+      stopBtn.type = "button";
+      stopBtn.className = "step-feed-stop-btn";
+      stopBtn.textContent = "Stop";
+      stopBtn.title = `Stop step ${stepNumber}`;
+      stopBtn.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        stopBtn.disabled = true;
+        stopBtn.textContent = "Stopping…";
+        await requestStepCancellation(stepNumber);
+      });
+      summary.appendChild(stopBtn);
+    }
     details.appendChild(summary);
 
     const body = document.createElement("div");
@@ -1132,6 +1253,16 @@ class ExecutionPlanView {
 const stepExecutionFeed = new StepExecutionFeed();
 const agentGraph = new AgentGraphView("agent-graph");
 const planGraph = new ExecutionPlanView("plan-graph-canvas");
+
+async function requestStepCancellation(stepNumber) {
+  if (stepNumber === undefined || stepNumber === null) return false;
+  try {
+    const resp = await fetch(`/api/sessions/${state.sessionId}/cancel-step/${stepNumber}`, { method: "POST" });
+    return resp.ok;
+  } catch (_) {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Plan graph popup toggle
@@ -2073,7 +2204,21 @@ function isChatNearBottom() {
   return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 80;
 }
 
-function addMessage(role, content, msgIndex) {
+function appendLiveTurnChild(container, child) {
+  if (container === chatArea || !container?.dataset?.stepLiveRegion) {
+    container.appendChild(child);
+    return;
+  }
+
+  const firstStepCard = [...container.children].find((el) => el.dataset.stepStartTime !== undefined);
+  if (firstStepCard) {
+    container.insertBefore(child, firstStepCard);
+  } else {
+    container.appendChild(child);
+  }
+}
+
+function addMessage(role, content, msgIndex, container = chatArea) {
   const div = document.createElement("div");
   div.className = `message ${role}-message`;
   if (msgIndex !== undefined) div.dataset.msgIndex = String(msgIndex);
@@ -2089,7 +2234,7 @@ function addMessage(role, content, msgIndex) {
   bubble.appendChild(inner);
   div.appendChild(bubble);
 
-  chatArea.appendChild(div);
+  appendLiveTurnChild(container, div);
   scrollToBottom();
   return div;
 }
@@ -2189,7 +2334,7 @@ function renderTimeline(container, timeline, shownPlotPaths = null) {
 
 // Create an agent message div with an inner timeline container, append to
 // chatArea, and return the inner container for live updates.
-function addAgentTimelineMessage(timeline, shownPlotPaths = null, msgIndex) {
+function addAgentTimelineMessage(timeline, shownPlotPaths = null, msgIndex, container = chatArea) {
   const outer = document.createElement("div");
   outer.className = "message agent-message";
   if (msgIndex !== undefined) outer.dataset.msgIndex = String(msgIndex);
@@ -2200,7 +2345,7 @@ function addAgentTimelineMessage(timeline, shownPlotPaths = null, msgIndex) {
   inner.className = "timeline-container";
   bubble.appendChild(inner);
   outer.appendChild(bubble);
-  chatArea.appendChild(outer);
+  appendLiveTurnChild(container, outer);
   renderTimeline(inner, timeline, shownPlotPaths);
   return inner;
 }
@@ -2833,161 +2978,174 @@ async function patchSessionAgentMode(mode) {
   }
 }
 
+async function fetchSessionData(sessionId) {
+  const owner = state.activeSessionUserId || state.userId;
+  const resp = await fetch(
+    `/api/users/${encodeURIComponent(owner)}/sessions/${encodeURIComponent(sessionId)}`,
+    { headers: { "Content-Type": "application/json" } }
+  );
+  if (!resp.ok) return null;
+  return resp.json();
+}
+
+async function fetchSessionStepNodes(sessionId) {
+  try {
+    const graphResp = await fetch(`/api/agent-graph/${encodeURIComponent(sessionId)}`);
+    if (!graphResp.ok) return [];
+    const graphData = await graphResp.json();
+    return Object.values(graphData.nodes || {})
+      .filter((node) => node.type === "step")
+      .sort((a, b) => stepNodeTimestamp(a) - stepNodeTimestamp(b));
+  } catch (_) {
+    return [];
+  }
+}
+
+function eventTimestamp(event, fallbackOrder) {
+  if (event.timestamp) {
+    const raw = Number(event.timestamp);
+    return raw < 1e12 ? raw * 1000 : raw;
+  }
+  if (event.createTime) return new Date(event.createTime).getTime();
+  return fallbackOrder;
+}
+
+function stepNodeTimestamp(node) {
+  return node.start_time ? new Date(node.start_time).getTime() : Infinity;
+}
+
+function buildSessionTimeline(events, stepNodes) {
+  const timeline = [];
+  events.forEach((event, idx) => {
+    timeline.push({ type: "event", data: event, ts: eventTimestamp(event, idx), order: idx });
+  });
+  stepNodes.forEach((node, idx) => {
+    timeline.push({ type: "step", data: node, ts: stepNodeTimestamp(node), order: 1e9 + idx });
+  });
+  timeline.sort((a, b) => a.ts - b.ts || a.order - b.order);
+  return timeline;
+}
+
+function collectFunctionResponsesById(events) {
+  const frById = {};
+  for (const event of events) {
+    for (const part of (event.content?.parts || [])) {
+      const fr = getFunctionResponse(part);
+      if (fr?.id) frById[fr.id] = fr;
+    }
+  }
+  return frById;
+}
+
+function eventToTimelineParts(event, frById) {
+  const parts = event.content?.parts || [];
+  const evtTimeline = [];
+  let accText = "";
+
+  for (const part of parts) {
+    if (part.thought) {
+      evtTimeline.push({ type: "thought", text: part.text || "" });
+    } else if (getFunctionCall(part)) {
+      const fc = getFunctionCall(part);
+      const matchedFr = frById[fc.id];
+      evtTimeline.push({
+        type: "function_call",
+        id: fc.id,
+        name: fc.name || "Unknown",
+        args: fc.args || {},
+      });
+      if (matchedFr) {
+        evtTimeline.push({
+          type: "function_response",
+          id: matchedFr.id,
+          name: matchedFr.name || "Unknown",
+          response: matchedFr.response || {},
+        });
+      }
+    } else if (getFunctionResponse(part)) {
+      const fr = getFunctionResponse(part);
+      const alreadyMatched = evtTimeline.some(
+        (item) => item.type === "function_response" && item.id === fr.id
+      );
+      if (!alreadyMatched) {
+        evtTimeline.push({
+          type: "function_response",
+          id: fr.id,
+          name: fr.name || "Unknown",
+          response: fr.response || {},
+        });
+      }
+    } else if (part.text && !part.thought) {
+      accText += part.text;
+      const last = evtTimeline[evtTimeline.length - 1];
+      if (last?.type === "text") {
+        last.text = accText;
+      } else {
+        evtTimeline.push({ type: "text", text: accText });
+      }
+    }
+  }
+
+  return evtTimeline;
+}
+
+function renderSessionTimeline(events, stepNodes) {
+  chatArea.innerHTML = "";
+  stepExecutionFeed.reset();
+
+  const timeline = buildSessionTimeline(events, stepNodes);
+  const frById = collectFunctionResponsesById(events);
+  let shownPlotPaths = new Set();
+  let msgIdx = 0;
+
+  for (const item of timeline) {
+    if (item.type === "step") {
+      stepExecutionFeed.appendStatic(item.data);
+      continue;
+    }
+
+    const event = item.data;
+    const role = event.author === "user" ? "user" : "agent";
+    if (role === "user") {
+      const text = displayMessageFromStoredUserText(
+        (event.content?.parts || []).map((part) => part.text || "").join("")
+      );
+      if (text) addMessage("user", text, msgIdx++);
+      shownPlotPaths = new Set();
+      continue;
+    }
+
+    const evtTimeline = eventToTimelineParts(event, frById);
+    if (evtTimeline.length > 0) {
+      addAgentTimelineMessage(evtTimeline, shownPlotPaths, msgIdx++);
+    }
+  }
+}
+
+function updateSessionWorkdirDisplay(sessionData) {
+  const workdirDisplay = document.getElementById("session-workdir-display");
+  if (!workdirDisplay) return;
+  const workdir = sessionData.state?.workdir || sessionData.state?.custom_workdir || state.defaultWorkdir || "";
+  workdirDisplay.textContent = workdir;
+  workdirDisplay.style.display = workdir ? "" : "none";
+}
+
 // Reload full session history from the ADK server and re-render the chat,
 // mirroring Streamlit's load_session() called after send_message_sse().
 async function loadSession(sessionId) {
   try {
-    const owner = state.activeSessionUserId || state.userId;
-    const resp = await fetch(
-      `/api/users/${encodeURIComponent(owner)}/sessions/${encodeURIComponent(sessionId)}`,
-      { headers: { "Content-Type": "application/json" } }
-    );
-    if (!resp.ok) {
+    const sessionData = await fetchSessionData(sessionId);
+    if (!sessionData) {
       state.sessionReady = false;
       return;
     }
     state.sessionReady = true;
-    const sessionData = await resp.json();
     const events = sessionData.events || [];
-    let shownPlotPaths = new Set();
-
-    // Rebuild chat from server-canonical state
-    chatArea.innerHTML = "";
-    stepExecutionFeed.reset();
-    let msgIdx = 0;
-
-    // Fetch graph data upfront so we can merge events and step cards
-    // into a single chronological timeline.
-    let graphNodes = [];
-    try {
-      const graphResp = await fetch(`/api/agent-graph/${encodeURIComponent(sessionId)}`);
-      if (graphResp.ok) {
-        const graphData = await graphResp.json();
-        graphNodes = Object.values(graphData.nodes || {})
-          .filter((n) => n.type === "step")
-          .sort((a, b) => {
-            const ta = a.start_time ? new Date(a.start_time).getTime() : Infinity;
-            const tb = b.start_time ? new Date(b.start_time).getTime() : Infinity;
-            return ta - tb;
-          });
-      }
-    } catch (_) {}
-
-    // Build a unified timeline: events and step cards sorted by timestamp.
-    const timeline = [];
-
-    events.forEach((event, idx) => {
-      // ADK event.timestamp is a float in seconds; convert to ms for comparison
-      // with step card start_time (which is an ISO string → ms via Date.getTime).
-      let ts;
-      if (event.timestamp) {
-        const raw = Number(event.timestamp);
-        ts = raw < 1e12 ? raw * 1000 : raw; // seconds → ms if needed
-      } else if (event.createTime) {
-        ts = new Date(event.createTime).getTime();
-      } else {
-        ts = idx;
-      }
-      timeline.push({ type: "event", data: event, ts, order: idx });
-    });
-
-    graphNodes.forEach((node, idx) => {
-      const ts = node.start_time ? new Date(node.start_time).getTime() : Infinity;
-      timeline.push({ type: "step", data: node, ts, order: 1e9 + idx });
-    });
-
-    timeline.sort((a, b) => a.ts - b.ts || a.order - b.order);
-
-    // First pass: collect all functionResponses keyed by ID for cross-event matching
-    const frById = {};
-    for (const event of events) {
-      for (const p of (event.content?.parts || [])) {
-        const fr = getFunctionResponse(p);
-        if (fr?.id) {
-          frById[fr.id] = fr;
-        }
-      }
-    }
-
-    // Process the unified timeline in chronological order
-    for (const item of timeline) {
-      if (item.type === "step") {
-        stepExecutionFeed._upsert(item.data);
-        continue;
-      }
-
-      const event = item.data;
-      const role = event.author === "user" ? "user" : "agent";
-      const parts = event.content?.parts || [];
-
-      if (role === "user") {
-        const text = displayMessageFromStoredUserText(parts.map((p) => p.text || "").join(""));
-        if (text) addMessage("user", text, msgIdx++);
-        shownPlotPaths = new Set();
-        continue;
-      }
-
-      const evtTimeline = [];
-      let accText = "";
-
-      for (const p of parts) {
-        if (p.thought) {
-          evtTimeline.push({ type: "thought", text: p.text || "" });
-        } else if (getFunctionCall(p)) {
-          const fc = getFunctionCall(p);
-          const matchedFr = frById[fc.id];
-          evtTimeline.push({
-            type: "function_call",
-            id: fc.id,
-            name: fc.name || "Unknown",
-            args: fc.args || {},
-          });
-          if (matchedFr) {
-            evtTimeline.push({
-              type: "function_response",
-              id: matchedFr.id,
-              name: matchedFr.name || "Unknown",
-              response: matchedFr.response || {},
-            });
-          }
-        } else if (getFunctionResponse(p)) {
-          const fr = getFunctionResponse(p);
-          const alreadyMatched = evtTimeline.some(
-            (t) => t.type === "function_response" && t.id === fr.id
-          );
-          if (!alreadyMatched) {
-            evtTimeline.push({
-              type: "function_response",
-              id: fr.id,
-              name: fr.name || "Unknown",
-              response: fr.response || {},
-            });
-          }
-        } else if (p.text && !p.thought) {
-          accText += p.text;
-          const last = evtTimeline[evtTimeline.length - 1];
-          if (last?.type === "text") {
-            last.text = accText;
-          } else {
-            evtTimeline.push({ type: "text", text: accText });
-          }
-        }
-      }
-
-      if (evtTimeline.length > 0) {
-        addAgentTimelineMessage(evtTimeline, shownPlotPaths, msgIdx++);
-      }
-    }
+    const graphNodes = await fetchSessionStepNodes(sessionId);
+    renderSessionTimeline(events, graphNodes);
 
     await refreshSessionFiles();
-
-    // Update workdir display in file explorer
-    const workdirDisplay = document.getElementById("session-workdir-display");
-    if (workdirDisplay) {
-      const workdir = sessionData.state?.workdir || sessionData.state?.custom_workdir || state.defaultWorkdir || "";
-      workdirDisplay.textContent = workdir;
-      workdirDisplay.style.display = workdir ? "" : "none";
-    }
+    updateSessionWorkdirDisplay(sessionData);
   } catch (err) {
     console.error("Failed to load session:", err);
   }
@@ -3120,7 +3278,8 @@ async function sendMessage(message) {
   try { await fetch(`/api/sessions/${state.sessionId}/cancel`, { method: "DELETE" }); } catch (_) {}
 
   const uploadsForMessage = state.currentUploads.slice();
-  addMessage("user", messageWithUploadNames(message, uploadsForMessage));
+  const userMessageEl = addMessage("user", messageWithUploadNames(message, uploadsForMessage));
+  const liveStartedAt = Date.now();
   const backendMessage = messageWithUploadContext(message, uploadsForMessage);
   textInput.value = "";
   clearCurrentUploads();
@@ -3129,10 +3288,12 @@ async function sendMessage(message) {
   if (!state.sessionReady) await createSession();
   if (!state.sessionReady) {
     addMessage("agent", "Failed to create session — the backend may still be loading. Please try again in a moment.");
+    stepExecutionFeed.finishLiveTurn();
     return;
   }
   agentGraph.reset();
   planGraph.reset();
+  const liveTurnContainer = stepExecutionFeed.startLiveTurn(userMessageEl, liveStartedAt);
   agentGraph.startPolling(state.sessionId);
   planGraph.startPolling(state.sessionId);
 
@@ -3209,7 +3370,7 @@ async function sendMessage(message) {
             }
 
             if (timeline.length > 0 && !timelineContainer) {
-              timelineContainer = addAgentTimelineMessage(timeline, shownPlotPaths);
+              timelineContainer = addAgentTimelineMessage(timeline, shownPlotPaths, undefined, liveTurnContainer);
             } else if (timelineContainer) {
               renderTimeline(timelineContainer, timeline, shownPlotPaths);
             }
@@ -3231,7 +3392,7 @@ async function sendMessage(message) {
             else if (p.functionCall) upsertTimelineEvent(timeline, { type: "function_call", id: p.functionCall.id, name: p.functionCall.name || "Unknown", args: p.functionCall.args || {} });
             else if (p.functionResponse) upsertTimelineEvent(timeline, { type: "function_response", id: p.functionResponse.id, name: p.functionResponse.name || "Unknown", response: p.functionResponse.response || {} });
             else if (p.text) { accText = mergeReplayedText(accText, p.text); upsertTimelineText(timeline, compactRepeatedPrefixSnapshots(accText)); }
-            if (timeline.length > 0 && !timelineContainer) timelineContainer = addAgentTimelineMessage(timeline, shownPlotPaths);
+            if (timeline.length > 0 && !timelineContainer) timelineContainer = addAgentTimelineMessage(timeline, shownPlotPaths, undefined, liveTurnContainer);
             else if (timelineContainer) renderTimeline(timelineContainer, timeline, shownPlotPaths);
           }
         } catch (_) {}
@@ -3239,9 +3400,9 @@ async function sendMessage(message) {
     }
   } catch (err) {
     if (err?.name === "AbortError") {
-      addMessage("agent", "Stopping execution…");
+      addMessage("agent", "Stopping execution…", undefined, liveTurnContainer);
     } else {
-      addMessage("agent", `Backend error: ${err}`);
+      addMessage("agent", `Backend error: ${err}`, undefined, liveTurnContainer);
     }
   } finally {
     await agentGraph._poll(state.sessionId);
@@ -3249,7 +3410,9 @@ async function sendMessage(message) {
     await planGraph._poll(state.sessionId);
     planGraph.stopPolling();
     await refreshSessionFiles();
+    stepExecutionFeed.finishLiveTurn();
     setSendingState(false);
+    await loadSession(state.sessionId);
   }
 }
 

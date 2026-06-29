@@ -25,5 +25,13 @@ jobs:
           pip install -e .
           pip install pytest
 
-      - name: Run MatCreator import tests
-        run: python -m pytest tests/test_matcreator_agent.py -v
+      - name: Run tests
+        run: |
+          python -m pytest \
+            tests/test_matcreator_agent.py \
+            tests/test_ports_config.py \
+            tests/test_matcreator_cli_ports.py \
+            tests/test_web_ports.py \
+            tests/test_compose_ports.py \
+            tests/test_vite_config_ports.py \
+            -v

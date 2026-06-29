@@ -60,6 +60,19 @@ Start an interactive session from the workspace you want MatCreator to use
 matcreator chat --workspace .
 ```
 
+### [Optional] Install vite
+For using vite web frontend, you need to install it first:
+```bash
+cd web/vite-frontend
+npm install
+````
+Make sure your system has node.js installed before installing vite.
+
+Check vite installation with:
+```bash
+npx vite --version
+```
+
 ---
 
 ## Launch

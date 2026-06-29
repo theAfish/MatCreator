@@ -1,14 +1,34 @@
 #!/usr/bin/env python3
-"""MatCreator CLI.
+"""MatCreator CLI — launch, run, and manage the MatCreator agent.
 
 Usage:
     matcreator [OPTIONS] COMMAND [ARGS]
 
-Commands:
-    web         Launch the ADK web UI.
-    api-server  Launch the ADK API server (used by the Streamlit app).
-    run         Run the agent non-interactively on a single prompt.
-    chat        Run the agent interactively in the terminal (workspace = CWD by default).
+Core Commands:
+    web           Launch the ADK web UI (browser-based chat interface).
+    api-server    Launch the ADK API server (used by the Streamlit app).
+    run           Run the agent non-interactively on a single prompt.
+    chat          Run the agent interactively in the terminal (workspace = CWD by default).
+
+Knowledge Graph Commands (matcreator graph ...):
+    serve         Launch the Know-Do Graph HTTP UI/server.
+    stats         Show graph-wide statistics (nodes, edges).
+    neighbors     Show graph neighbors for a given entry ID.
+    export        Export graph entries.
+
+Knowledge Management Commands (matcreator knowledge ...):
+    query         Search the knowledge graph for nodes matching a query string.
+    search-skills Find skill nodes by semantic similarity to a query.
+    related-skills Traverse the dependency graph from a known skill node.
+    stats         Print knowledge graph and in-memory entry counts.
+    seed          Seed the Know-Do Graph from all SKILL.md and guide files.
+    migrate       Import legacy skill definitions, memories, and MEMORY.md data.
+    distill       Promote frequently successful memory entries into durable knowledge.
+
+Configuration Commands (matcreator config ...):
+    set           Set a configuration value (e.g. llm.api_key=sk-xxx).
+    get           Print a single configuration value.
+    show          Print all current configuration settings.
 
 Examples:
     matcreator web
@@ -18,6 +38,13 @@ Examples:
     matcreator run -f prompt.txt --output-format json -o result.json
     matcreator chat
     matcreator chat --workspace ~/my-project
+    matcreator chat --session <id>        # resume a previous session
+    matcreator graph stats
+    matcreator graph neighbors <entry_id>
+    matcreator knowledge seed
+    matcreator knowledge query "DFT calculation"
+    matcreator config set llm.api_key=sk-xxx
+    matcreator config show
     MATCLAW_WORKSPACE=/data/ws matcreator run -p "hello"
 """
 
@@ -36,6 +63,8 @@ from typing import Union
 import yaml
 
 import click
+
+from matcreator.ports import get_adk_host, get_adk_port
 
 
 _MATCREATOR_HOME = Path(os.environ.get("MATCREATOR_HOME", "~/.matcreator")).expanduser()
@@ -76,14 +105,19 @@ def _make_agent_loader():
 
 
 def _start_adk_server(
-    host: str,
-    port: int,
+    host: str | None,
+    port: int | None,
     log_level: str,
     web_ui: bool,
     reload_agents: bool = False,
     reload: bool = False,
 ) -> None:
     """Start the ADK server programmatically with controlled session storage."""
+    if host is None:
+        host = get_adk_host()
+    if port is None:
+        port = get_adk_port()
+
     import uvicorn
     from google.adk.cli.fast_api import get_fast_api_app
 
@@ -118,10 +152,10 @@ def _start_adk_server(
 
 # Shared options applied to web/api-server subcommands
 _shared_options = [
-    click.option("--host", default="127.0.0.1", show_default=True,
-                 help="Binding host for the ADK server."),
-    click.option("--port", default=8000, show_default=True, type=int,
-                 help="Port for the ADK server."),
+    click.option("--host", default=None,
+                 help="Binding host for the ADK server (default: resolved from config/MATCREATOR_ADK_HOST env)."),
+    click.option("--port", type=int, default=None,
+                 help="Port for the ADK server (default: resolved from config/MATCREATOR_ADK_PORT env)."),
     click.option("--workspace", default=None, metavar="DIR",
                  help="Override the workspace root directory (also settable via MATCLAW_WORKSPACE)."),
     click.option("--log-level",
@@ -211,7 +245,7 @@ def _matcreator_kdg_env() -> dict[str, str]:
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main():
-    """MatCreator CLI — manage and run the MatCreator agent."""
+    """MatCreator CLI — launch, run, and manage the MatCreator agent."""
 
 
 @main.command("web")
@@ -285,10 +319,10 @@ def graph_stats(ctx: click.Context) -> None:
     "neighbors",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
-@click.argument("entry_id")
+@click.argument("entry_id", metavar="ENTRY_ID")
 @click.pass_context
 def graph_neighbors(ctx: click.Context, entry_id: str) -> None:
-    """Show graph neighbors for an entry using MatCreator's active database."""
+    """Show graph neighbors for the given ENTRY_ID using MatCreator's active database."""
     env = _matcreator_kdg_env()
     cmd = [_resolve_kdg_cli(), "graph", "neighbors", entry_id, *ctx.args]
     _run_with_env(cmd, env)
@@ -417,7 +451,12 @@ async def run_agent_async(
 @click.option("--flash", is_flag=True, default=False,
               help="Run in Flash mode: thinking agent executes directly, no DAG or approval required.")
 def run_cmd(workspace, prompt_text, prompt_file, output_format, output_file, max_turns, session_id, flash):
-    """Run the agent non-interactively on a single prompt."""
+    """Run the agent non-interactively on a single prompt and print the result.
+
+    Provide a prompt via -p/--prompt (inline text) or -f/--prompt-file (path to
+    a file).  Use --output-format json for structured output or -o to write
+    to a file.
+    """
     if prompt_text and prompt_file:
         raise click.UsageError("Use either -p/--prompt or -f/--prompt-file, not both.")
     if not prompt_text and not prompt_file:
@@ -575,7 +614,7 @@ def _ensure_workspace(workspace: str | None) -> None:
 
 
 @knowledge_group.command("query")
-@click.argument("text")
+@click.argument("text", metavar="TEXT")
 @click.option("--top-k", default=15, show_default=True, type=int,
               help="Maximum number of nodes to return.")
 @click.option("--depth", default=2, show_default=True, type=int,
@@ -583,7 +622,12 @@ def _ensure_workspace(workspace: str | None) -> None:
 @click.option("--workspace", default=None, metavar="DIR",
               help="Override the workspace root directory.")
 def knowledge_query(text, top_k, depth, workspace):
-    """Query the memory knowledge graph for nodes matching TEXT."""
+    """Query the memory knowledge graph for nodes matching TEXT.
+
+    TEXT is a free-form query string that is matched against node content
+    using semantic similarity.  Increase --depth to explore further from
+    the initial matches.
+    """
     _ensure_workspace(workspace)
     from matcreator.knowledge.query import query_knowledge_graph
     result = query_knowledge_graph(text, depth=depth, top_k=top_k)
@@ -591,13 +635,17 @@ def knowledge_query(text, top_k, depth, workspace):
 
 
 @knowledge_group.command("search-skills")
-@click.argument("text")
+@click.argument("text", metavar="TEXT")
 @click.option("--top-k", default=5, show_default=True, type=int,
               help="Maximum number of skills to return.")
 @click.option("--workspace", default=None, metavar="DIR",
               help="Override the workspace root directory.")
 def knowledge_search_skills(text, top_k, workspace):
-    """Search for skill nodes semantically matching TEXT."""
+    """Search for skill nodes semantically matching TEXT.
+
+    TEXT is matched against skill names and descriptions using embedding
+    similarity.  Use this to discover skills relevant to a task or concept.
+    """
     _ensure_workspace(workspace)
     from matcreator.knowledge.query import search_skills
     result = search_skills(text, top_k=top_k)
@@ -605,7 +653,7 @@ def knowledge_search_skills(text, top_k, workspace):
 
 
 @knowledge_group.command("related-skills")
-@click.argument("start_node")
+@click.argument("start_node", metavar="START_NODE")
 @click.option("--top-k", default=5, show_default=True, type=int,
               help="Maximum number of related skills to return.")
 @click.option("--depth", default=2, show_default=True, type=int,
@@ -613,7 +661,12 @@ def knowledge_search_skills(text, top_k, workspace):
 @click.option("--workspace", default=None, metavar="DIR",
               help="Override the workspace root directory.")
 def knowledge_related_skills(start_node, top_k, depth, workspace):
-    """Traverse the dependency graph from a known skill START_NODE."""
+    """Traverse the dependency graph from START_NODE to find related skills.
+
+    START_NODE is the name of a known skill (e.g. "deepmd" or "lammps").
+    The command follows dependency edges outward to discover skills that are
+    related through shared concepts, tools, or workflows.
+    """
     _ensure_workspace(workspace)
     from matcreator.knowledge.query import get_related_skills
     result = get_related_skills(start_node, top_k=top_k, depth=depth)
@@ -624,7 +677,7 @@ def knowledge_related_skills(start_node, top_k, depth, workspace):
 @click.option("--workspace", default=None, metavar="DIR",
               help="Override the workspace root directory.")
 def knowledge_stats(workspace):
-    """Print durable Know-Do and writable MemGraph counts."""
+    """Print node and edge counts for the knowledge graph and in-memory entries."""
     _ensure_workspace(workspace)
     from matcreator.knowledge.kdg_memory import iter_memory
     from matcreator.knowledge.query import _get_kg
@@ -725,9 +778,10 @@ def config_group():
 @config_group.command("set")
 @click.argument("assignment", metavar="KEY=VALUE")
 def config_set(assignment: str):
-    """Set a config value.
+    """Set a configuration value in ~/.matcreator/config.yaml.
 
-    KEY uses dotted notation: section.field (e.g. llm.api_key, bohrium.email).
+    KEY uses dotted notation (section.field) and is separated from VALUE
+    by an equals sign, e.g. ``llm.api_key=sk-xxx``.
     """
     if "=" not in assignment:
         raise click.UsageError("Expected KEY=VALUE format (e.g. llm.api_key=sk-xxx)")
@@ -743,10 +797,14 @@ def config_set(assignment: str):
 
 
 @config_group.command("get")
-@click.argument("key")
+@click.argument("key", metavar="KEY")
 @click.option("--reveal", is_flag=True, default=False, help="Show secret values in plain text.")
 def config_get(key: str, reveal: bool):
-    """Print the value of KEY from ~/.matcreator/config.yaml."""
+    """Print the value of KEY from ~/.matcreator/config.yaml.
+
+    Sensitive values (API keys, passwords) are masked by default.
+    Use --reveal to display them in plain text.
+    """
     from matcreator.config import get_config_value
     value = get_config_value(key)
     display = value if reveal else _mask(key, value)

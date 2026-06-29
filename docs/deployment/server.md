@@ -124,3 +124,33 @@ docker exec -it matcreator-worker-<user_id> bash
 - Mounting `/var/run/docker.sock` gives the control plane high host privileges.
 - Use HTTPS for real deployments. The included nginx config is plain HTTP for local or internal-server setup.
 - Back up `MATCREATOR_HOST_DATA_ROOT`; worker containers should be considered replaceable.
+
+## Configurable Ports
+
+Server-mode deployment supports configurable host-facing ports via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MATCREATOR_SERVER_PROXY_HOST_PORT` | 80 | Nginx proxy host port |
+| `MATCREATOR_SERVER_PROXY_PORT` | 80 | Nginx proxy container port |
+| `MATCREATOR_WEB_HOST_PORT` | 8001 | Control-plane host port |
+| `MATCREATOR_WEB_PORT` | 8001 | Control-plane container port |
+| `MATCREATOR_ADK_PORT` | 8000 | ADK API (internal) |
+| `MATCREATOR_WORKER_BASE_PORT` | 9001 | Worker container base port |
+
+Example: run server mode on custom ports:
+
+```bash
+MATCREATOR_SERVER_PROXY_HOST_PORT=8080 \
+MATCREATOR_WEB_HOST_PORT=8101 \
+docker compose -f docker-compose.server.yml up
+```
+
+For personal Docker deployment:
+
+```bash
+MATCREATOR_ADK_HOST_PORT=8100 \
+MATCREATOR_WEB_HOST_PORT=8101 \
+MATCREATOR_FRONTEND_HOST_PORT=5174 \
+docker compose up
+```

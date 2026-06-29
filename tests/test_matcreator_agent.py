@@ -2,7 +2,6 @@
 
 Each test runs the target import in an isolated subprocess so that:
   - Module-level state (WORKSPACE_ROOT, ALL_SKILLS) is resolved fresh per run.
-  - MCP TCP probes in mcp_tools.py don't affect the test-runner process.
 
 A minimal workspace (just a ``skills/`` subdirectory) is created in a temp
 directory and pointed to via the MATCLAW_WORKSPACE env var so that
@@ -16,8 +15,7 @@ import unittest
 import subprocess
 from pathlib import Path
 
-# mcp_tools.py probes 6 servers with a 2-second TCP timeout each.
-_IMPORT_TIMEOUT = 60  # seconds
+_IMPORT_TIMEOUT = 15  # seconds
 # Project root (one level above tests/)
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 

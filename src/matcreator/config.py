@@ -88,21 +88,24 @@ def save_config(config: dict[str, Any]) -> None:
 
 def get_config_value(dotted_key: str) -> str:
     """Return the string value at *dotted_key* (e.g. 'llm.api_key'), or ''."""
-    parts = dotted_key.split(".", 1)
+    parts = dotted_key.split(".")
     cfg = load_config()
-    if len(parts) == 1:
-        return str(cfg.get(parts[0], ""))
-    return str(cfg.get(parts[0], {}).get(parts[1], ""))
+    d = cfg
+    for part in parts[:-1]:
+        d = d.get(part, {})
+        if not isinstance(d, dict):
+            return ""
+    return str(d.get(parts[-1], ""))
 
 
 def set_config_value(dotted_key: str, value: str) -> None:
     """Write *value* to *dotted_key* in config.yaml."""
-    parts = dotted_key.split(".", 1)
+    parts = dotted_key.split(".")
     cfg = load_config()
-    if len(parts) == 1:
-        cfg[parts[0]] = value
-    else:
-        cfg.setdefault(parts[0], {})[parts[1]] = value
+    d = cfg
+    for part in parts[:-1]:
+        d = d.setdefault(part, {})
+    d[parts[-1]] = value
     save_config(cfg)
 
 

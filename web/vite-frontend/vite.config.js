@@ -1,5 +1,11 @@
 import { defineConfig } from "vite";
 
+// Configurable port variables
+const webPort = process.env.MATCREATOR_WEB_PORT || "8001";
+const webTarget =
+  process.env.MATCREATOR_WEB_TARGET || `http://localhost:${webPort}`;
+const frontendPort = Number(process.env.MATCREATOR_FRONTEND_PORT || "5173");
+
 // ADK's _OriginCheckMiddleware blocks non-safe HTTP methods (POST/DELETE/…)
 // when the Origin header doesn't match the server's own host. Vite forwards
 // the browser's Origin (e.g. http://localhost:5173) unchanged, which ADK
@@ -13,23 +19,25 @@ function stripOrigin(proxy) {
 
 export default defineConfig({
   server: {
+    port: frontendPort,
+    strictPort: true,
     proxy: {
       "/api": {
-        target: "http://localhost:8001",
+        target: webTarget,
         ws: true,
       },
       "/run_sse": {
-        target: "http://localhost:8001",
+        target: webTarget,
         changeOrigin: true,
         configure: stripOrigin,
       },
       "/apps": {
-        target: "http://localhost:8001",
+        target: webTarget,
         changeOrigin: true,
         configure: stripOrigin,
       },
       "/list-apps": {
-        target: "http://localhost:8001",
+        target: webTarget,
         changeOrigin: true,
         configure: stripOrigin,
       },
