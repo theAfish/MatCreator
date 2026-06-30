@@ -449,6 +449,17 @@ body {
   transform: rotate(90deg);
 }
 
+.step-feed-details[open] > .step-feed-summary {
+  align-items: flex-start;
+}
+
+.step-feed-details[open] > .step-feed-summary .step-feed-title {
+  white-space: normal;
+  text-overflow: clip;
+  overflow: visible;
+  word-break: break-all;
+}
+
 .step-feed-title {
   flex: 1;
   min-width: 0;
@@ -859,6 +870,73 @@ details.panel-block:not([open]) > summary.block-header::after { transform: rotat
   max-width: 100%;
   max-height: 70vh;
   border-radius: 4px;
+}
+
+/* ── Image lightbox ──────────────────────────────────── */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  flex-direction: column;
+  z-index: 9999;
+  cursor: grab;
+}
+.lightbox-overlay:active {
+  cursor: grabbing;
+}
+.lightbox-overlay.hidden {
+  display: none;
+}
+.lightbox-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(0, 0, 0, 0.5);
+  flex-shrink: 0;
+  justify-content: flex-end;
+}
+.lightbox-zoom-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  min-width: 40px;
+  text-align: right;
+}
+.lightbox-zoom-btn,
+.lightbox-close-btn {
+  font-size: 14px;
+  color: #ccc;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 3px 9px;
+  line-height: 1;
+}
+.lightbox-zoom-btn:hover,
+.lightbox-close-btn:hover {
+  color: #fff;
+  background: rgba(255,255,255,0.12);
+}
+.lightbox-close-btn {
+  font-size: 16px;
+  padding: 3px 10px;
+}
+.lightbox-viewport {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+.lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 0.08s ease;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ── Login overlay ───────────────────────────────────────── */
@@ -1275,6 +1353,34 @@ details summary:hover { color: var(--text); }
   flex: 1;
   width: 100%;
   overflow: hidden;
+}
+
+.plan-graph-counter {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
+.plan-graph-nav-controls {
+  display: flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.plan-graph-nav-btn {
+  font-size: 11px;
+  padding: 2px 6px;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.plan-graph-nav-btn:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.06);
 }
 
 /* ── Responsive ─────────────────────────────────────────── */
