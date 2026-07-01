@@ -1931,6 +1931,16 @@ function renderUserDisplay() {
   userDisplay.textContent = state.isAdmin ? `${label} (admin)` : label;
 }
 
+function canWriteActiveSession() {
+  return state.deploymentMode === "local" || !state.activeSessionUserId || state.activeSessionUserId === state.userId;
+}
+
+function activeSessionBackendUserId() {
+  return state.deploymentMode === "local"
+    ? (state.activeSessionUserId || state.userId)
+    : state.userId;
+}
+
 async function refreshAccess() {
   state.isAdmin = false;
   if (!state.userId) return;
@@ -3168,7 +3178,7 @@ async function uploadFilesToSession(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return;
   if (!state.userId) { showLoginModal(); return; }
-  if (state.activeSessionUserId && state.activeSessionUserId !== state.userId) {
+  if (!canWriteActiveSession()) {
     addMessage("agent", `Admin view is read-only for ${state.activeSessionUserId}'s session.`);
     return;
   }
@@ -3214,7 +3224,7 @@ async function uploadFilesToSession(fileList) {
 
 async function createSession() {
   state.activeSessionUserId = state.userId;
-  const url = `/apps/${APP_NAME}/users/${state.userId}/sessions/${state.sessionId}`;
+  const url = `/apps/${APP_NAME}/users/${activeSessionBackendUserId()}/sessions/${state.sessionId}`;
   const defaultWorkdir = (state.defaultWorkdir || "").trim();
   const sessionWorkdir = state.customWorkdir || defaultWorkdir;
   try {
@@ -3339,7 +3349,7 @@ knowledgeReviewBanner?.addEventListener("click", () => {
 
 async function patchSessionAgentMode(mode) {
   if (!state.sessionReady || !state.sessionId) return;
-  const url = `/apps/${APP_NAME}/users/${encodeURIComponent(state.userId)}/sessions/${encodeURIComponent(state.sessionId)}`;
+  const url = `/apps/${APP_NAME}/users/${encodeURIComponent(activeSessionBackendUserId())}/sessions/${encodeURIComponent(state.sessionId)}`;
   try {
     const delta = { agent_mode: mode, benchmark_mode: mode === "bench" };
     const resp = await fetch(url, {
@@ -3534,6 +3544,9 @@ async function loadSession(sessionId) {
       return;
     }
     state.sessionReady = true;
+    if (state.deploymentMode === "local" && sessionData.userId) {
+      state.activeSessionUserId = sessionData.userId;
+    }
     const events = sessionData.events || [];
     const graphNodes = await fetchSessionStepNodes(sessionId);
     renderSessionTimeline(events, graphNodes);
@@ -3670,7 +3683,7 @@ async function sendMessage(message) {
   if (!message.trim()) return;
   if (state.isSending) return;
   if (!state.userId) { showLoginModal(); return; }
-  if (state.activeSessionUserId && state.activeSessionUserId !== state.userId) {
+  if (!canWriteActiveSession()) {
     addMessage("agent", `Admin view is read-only for ${state.activeSessionUserId}'s session.`);
     return;
   }
@@ -3703,7 +3716,7 @@ async function sendMessage(message) {
   setSendingState(true, controller);
   const payload = {
     app_name: APP_NAME,
-    user_id: state.userId,
+    user_id: activeSessionBackendUserId(),
     session_id: state.sessionId,
     new_message: {
       role: "user",
