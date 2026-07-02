@@ -36,6 +36,7 @@ const state = {
 
 const chatArea = document.getElementById("chat-area");
 const textInput = document.getElementById("text-input");
+const inputContainer = document.querySelector(".input-container");
 const sendBtn = document.getElementById("send-btn");
 const fileUploadBtn = document.getElementById("file-upload-btn");
 const fileUploadInput = document.getElementById("file-upload-input");
@@ -52,7 +53,6 @@ const svCanvas = document.getElementById("sv-canvas");
 const svMeta = document.getElementById("sv-meta");
 const svClose = document.getElementById("sv-close");
 const graphResizer = document.getElementById("graph-resizer");
-const detailResizer = document.getElementById("detail-resizer");
 const structureResizer = document.getElementById("structure-resizer");
 const graphStatusEl = document.getElementById("graph-status");
 const loginModal = document.getElementById("login-modal");
@@ -75,9 +75,7 @@ const editUserBtn = document.getElementById("edit-user");
 const logoutBtn = document.getElementById("logout-btn");
 const settingsLogoutBtn = document.getElementById("settings-logout-btn");
 const benchToggle = null; // removed — replaced by mode-selector
-const benchChip = null;  // removed — replaced by agent-mode-chip
 const modeSelector = document.getElementById("mode-selector");
-const agentModeChip = document.getElementById("agent-mode-chip");
 const graphColumn       = document.getElementById("graph-column");
 const sidePanel         = document.getElementById("side-panel");
 const fileExplorerCol   = document.getElementById("file-explorer-col");
@@ -135,25 +133,19 @@ const STATUS_COLORS = {
 
 const MOBILE_LAYOUT_QUERY = window.matchMedia("(max-width: 900px)");
 const PANEL_HEIGHT_DEFAULTS = {
-  "graph-viewport": 600,
-  "graph-detail": 500,
   "structure-viewer": 500,
 };
 const PANEL_HEIGHT_BOUNDS = {
-  "graph-viewport": { min: 220, max: 1200 },
-  "graph-detail": { min: 110, max: 600 },
   "structure-viewer": { min: 140, max: 900 },
 };
 
 const COL_WIDTH_DEFAULTS = {
   "graph-column": 360,
-  "side-panel": 300,
-  "file-explorer-col": 260,
+  "side-panel": 320,
 };
 const COL_WIDTH_BOUNDS = {
   "graph-column":      { min: 240, max: 600 },
-  "side-panel":        { min: 200, max: 500 },
-  "file-explorer-col": { min: 160, max: 500 },
+  "side-panel":        { min: 240, max: 520 },
 };
 
 class AgentGraphView {
@@ -167,6 +159,7 @@ class AgentGraphView {
     this._didInitialFit = false;
     this._pendingFit = true;
     this._detailEl = document.getElementById("graph-detail");
+    this._detailClose = document.getElementById("graph-detail-close");
     this._detailLabel = document.getElementById("detail-label");
     this._detailStatus = document.getElementById("detail-status");
     this._detailSummary = document.getElementById("detail-summary");
@@ -241,6 +234,10 @@ class AgentGraphView {
       if (params.nodes.length) this._showDetail(params.nodes[0]);
     });
     this._network.on("deselectNode", () => this._hideDetail());
+    this._detailClose?.addEventListener("click", () => {
+      this._network.unselectAll();
+      this._hideDetail();
+    });
   }
 
   _visNode(raw) {
@@ -389,34 +386,50 @@ class AgentGraphView {
     return displayEdges;
   }
 
-  _resizeSurface(levels) {
+  _resizeSurface() {
     if (!this._surfaceEl || !graphViewport) return;
 
-    // Keep the graph canvas matched to the visible viewport so vis-network's
-    // fit() shows the whole graph in the default view instead of fitting into
-    // an oversized off-screen surface.
-    const targetWidth = Math.max(620, Math.round(graphViewport.clientWidth || 620));
-    const targetHeight = Math.max(420, Math.round(graphViewport.clientHeight || 420));
+    // Match the canvas to the visible viewport exactly; larger off-screen
+    // surfaces make fit() center against hidden space instead of the panel.
+    const targetWidth = Math.max(1, Math.round(graphViewport.clientWidth || 1));
+    const targetHeight = Math.max(1, Math.round(graphViewport.clientHeight || 1));
     this._surfaceEl.style.width = `${targetWidth}px`;
     this._surfaceEl.style.height = `${targetHeight}px`;
   }
 
   _fitGraph() {
     if (!this._network || this._nodes.length === 0) return;
-    this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
-    this._didInitialFit = true;
-    this._pendingFit = false;
+    requestAnimationFrame(() => {
+      if (!this._network || this._nodes.length === 0) return;
+      this._network.redraw();
+      this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+      this._didInitialFit = true;
+      this._pendingFit = false;
+    });
   }
 
   update(graphData) {
     if (!graphData || typeof graphData.nodes !== "object") return;
 
+    const prevNodeIds = new Set(this._nodes.getIds());
+    const prevEdgeIds = new Set(this._edges.getIds());
     const rawNodes = Object.values(graphData.nodes);
     this._nodeData = graphData.nodes;
     stepExecutionFeed.update(graphData);
     const displayEdges = this._buildDisplayEdges(rawNodes, graphData.edges || []);
     const levels = this._computeLevels(rawNodes, displayEdges);
     this._resizeSurface(levels);
+    const nextNodeIds = new Set(rawNodes.map((raw) => raw.id));
+    const nextEdgeIds = new Set(displayEdges.map((e) => e.id || `${e.from}__${e.to}`));
+    const topologyChanged =
+      prevNodeIds.size !== nextNodeIds.size ||
+      prevEdgeIds.size !== nextEdgeIds.size ||
+      [...nextNodeIds].some((id) => !prevNodeIds.has(id)) ||
+      [...nextEdgeIds].some((id) => !prevEdgeIds.has(id));
+
+    this._nodes.getIds().forEach((nodeId) => {
+      if (!nextNodeIds.has(nodeId)) this._nodes.remove(nodeId);
+    });
 
     rawNodes.forEach((raw) => {
       const vis = this._visNode(raw);
@@ -428,9 +441,8 @@ class AgentGraphView {
       }
     });
 
-    const displayEdgeIds = new Set(displayEdges.map((e) => e.id || `${e.from}__${e.to}`));
     this._edges.getIds().forEach((edgeId) => {
-      if (!displayEdgeIds.has(edgeId)) this._edges.remove(edgeId);
+      if (!nextEdgeIds.has(edgeId)) this._edges.remove(edgeId);
     });
 
     const existingEdgeIds = new Set(this._edges.getIds());
@@ -448,7 +460,7 @@ class AgentGraphView {
       }
     });
 
-    if (rawNodes.length > 0 && (!this._didInitialFit || this._pendingFit)) {
+    if (rawNodes.length > 0 && (topologyChanged || !this._didInitialFit || this._pendingFit)) {
       this._fitGraph();
     }
 
@@ -1274,7 +1286,10 @@ const planGraphCloseBtn = document.getElementById("plan-graph-close");
 
 function showPlanGraph() {
   planGraphPopup?.classList.remove("hidden");
-  planGraph.notifyLayoutChanged();
+  requestAnimationFrame(() => {
+    planGraph.notifyLayoutChanged();
+    planGraph.fitToView();
+  });
 }
 
 function hidePlanGraph() {
@@ -1354,16 +1369,9 @@ function refreshGraphAndStructureLayout() {
 
 function syncPanelResizerVisibility() {
   const hideAll = isMobileLayout();
-  const detailHidden = graphDetail.classList.contains("hidden");
   const structureHidden = structureViewer.classList.contains("hidden");
 
-  if (graphResizer) {
-    graphResizer.classList.toggle("hidden", hideAll);
-  }
-
-  if (detailResizer) {
-    detailResizer.classList.toggle("hidden", hideAll || detailHidden);
-  }
+  graphResizer?.classList.add("hidden");
 
   if (structureResizer) {
     structureResizer.classList.toggle("hidden", hideAll || structureHidden);
@@ -1436,15 +1444,6 @@ function initPanelResizer(handleEl, targetEl) {
 function colStorageKey(colId) {
   return `mat_col_width_${state.userId || "anon"}_${colId}`;
 }
-function filesColOpenKey() {
-  return `mat_files_col_open_${state.userId || "anon"}`;
-}
-function isFilesColOpen() {
-  return localStorage.getItem(filesColOpenKey()) === "true";
-}
-function setFilesColOpen(open) {
-  localStorage.setItem(filesColOpenKey(), String(open));
-}
 function getColWidth(colEl) {
   return Math.round(colEl.getBoundingClientRect().width);
 }
@@ -1466,40 +1465,11 @@ function applyStoredColWidths() {
     applyColWidth(el, Number.isFinite(w) ? w : COL_WIDTH_DEFAULTS[colId]);
   }
 }
-function applyFilesColState(open) {
-  if (!fileExplorerCol) return;
-  if (isMobileLayout()) {
-    fileExplorerCol.style.removeProperty("width");
-    fileExplorerCol.classList.remove("is-open");
-    colResizerFiles?.classList.add("hidden");
-    filesColToggleBtn?.classList.remove("is-active");
-    return;
-  }
-  if (open) {
-    fileExplorerCol.classList.add("is-open");
-    const raw = localStorage.getItem(colStorageKey("file-explorer-col"));
-    const w = raw ? Number(raw) : COL_WIDTH_DEFAULTS["file-explorer-col"];
-    applyColWidth(fileExplorerCol, w);
-    colResizerFiles?.classList.remove("hidden");
-    filesColToggleBtn?.classList.add("is-active");
-  } else {
-    fileExplorerCol.classList.remove("is-open");
-    fileExplorerCol.style.width = "0";
-    colResizerFiles?.classList.add("hidden");
-    filesColToggleBtn?.classList.remove("is-active");
-  }
-}
-function toggleFilesCol() {
-  const willOpen = !isFilesColOpen();
-  setFilesColOpen(willOpen);
-  applyFilesColState(willOpen);
-  if (willOpen) refreshSessionFiles();
-}
 function syncColResizerVisibility() {
   const mobile = isMobileLayout();
   colResizerGraph?.classList.toggle("hidden", mobile);
   colResizerSide?.classList.toggle("hidden", mobile);
-  colResizerFiles?.classList.toggle("hidden", mobile || !isFilesColOpen());
+  colResizerFiles?.classList.add("hidden");
 }
 
 /**
@@ -1544,15 +1514,13 @@ function initColResizer(handleEl, targetEl, direction = 1) {
 
 function initColResizers() {
   applyStoredColWidths();
-  applyFilesColState(isFilesColOpen());
+  fileExplorerCol?.classList.add("is-open");
   syncColResizerVisibility();
   initColResizer(colResizerGraph, graphColumn, 1);
   initColResizer(colResizerSide, sidePanel, -1);
-  initColResizer(colResizerFiles, fileExplorerCol, -1);
-  filesColToggleBtn?.addEventListener("click", toggleFilesCol);
   MOBILE_LAYOUT_QUERY.addEventListener("change", () => {
     applyStoredColWidths();
-    applyFilesColState(isFilesColOpen());
+    fileExplorerCol?.classList.add("is-open");
     syncColResizerVisibility();
     refreshGraphAndStructureLayout();
   });
@@ -1560,8 +1528,6 @@ function initColResizers() {
 
 function initPanelResizers() {
   applyStoredPanelHeights();
-  initPanelResizer(graphResizer, graphViewport);
-  initPanelResizer(detailResizer, graphDetail);
   initPanelResizer(structureResizer, structureViewer);
   syncPanelResizerVisibility();
 
@@ -1693,7 +1659,7 @@ function _applySession(result) {
   hideLoginModal();
   applyStoredPanelHeights();
   applyStoredColWidths();
-  applyFilesColState(isFilesColOpen());
+  fileExplorerCol?.classList.add("is-open");
   syncColResizerVisibility();
   loadSessions();
 }
@@ -3581,24 +3547,16 @@ Array.from(document.querySelectorAll("[data-quick]"))
   .forEach((btn) => btn.addEventListener("click", () => sendMessage(btn.dataset.quick || "")));
 
 // Agent mode selector
-function updateAgentModeChip(mode) {
-  if (!agentModeChip) return;
-  const labels = { flash: "⚡ Flash Mode", bench: "⚡ Bench Mode" };
-  const label = labels[mode];
-  if (label) {
-    agentModeChip.textContent = label;
-    agentModeChip.dataset.mode = mode;
-    agentModeChip.classList.remove("hidden");
-  } else {
-    agentModeChip.classList.add("hidden");
-  }
+function updateComposerModeState(mode) {
+  if (!inputContainer) return;
+  inputContainer.dataset.agentMode = mode || "normal";
 }
 
 if (modeSelector) {
   modeSelector.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.classList.toggle("mode-btn-active", btn.dataset.mode === state.agentMode);
   });
-  updateAgentModeChip(state.agentMode);
+  updateComposerModeState(state.agentMode);
   modeSelector.addEventListener("click", (e) => {
     const btn = e.target.closest(".mode-btn");
     if (!btn) return;
@@ -3608,7 +3566,7 @@ if (modeSelector) {
     modeSelector.querySelectorAll(".mode-btn").forEach((b) =>
       b.classList.toggle("mode-btn-active", b.dataset.mode === mode)
     );
-    updateAgentModeChip(mode);
+    updateComposerModeState(mode);
     patchSessionAgentMode(mode);
   });
 }
