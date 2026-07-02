@@ -19,6 +19,7 @@ from ..thinking_agent.planning import (
     mark_dependents_blocked,
 )
 from .step_executor_runner import run_step_executor
+from .recovery import reconcile_recovery_state
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,9 @@ def _exec_before_agent_callback(callback_context: CallbackContext) -> None:
 
     session_id = state.get("session_id", "default")
     state["workspace_dir"] = state.get("workdir") or str(get_session_workdir(session_id))
+    recovered = reconcile_recovery_state(state, state["workspace_dir"])
+    if recovered:
+        logger.warning("[execution_orchestrator] recovered execution state: %s", recovered)
 
 
 # ---------------------------------------------------------------------------

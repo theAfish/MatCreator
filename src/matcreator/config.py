@@ -11,6 +11,15 @@ Supported sections:
     embedding_model: text-embedding-v4
     graph_agent_model: ...   # optional override
     review_agent_model: ...  # optional override
+        executor_cards:
+            default: balanced
+            cards:
+                balanced:
+                    model: openai/qwen3-plus
+                    description: General executor model for routine tool use.
+                    skills: [filesystem, python]
+                    cost_tier: medium
+                    latency_tier: medium
 
   bohrium:
     email: user@example.com
@@ -75,6 +84,17 @@ def load_config() -> dict[str, Any]:
         return yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except (yaml.YAMLError, OSError):
         return {}
+
+
+def load_llm_cards_config() -> dict[str, Any]:
+    """Return executor LLM-card config from ~/.matcreator/config.yaml."""
+    cfg = load_config()
+    llm_cfg = cfg.get("llm")
+    if isinstance(llm_cfg, dict) and isinstance(llm_cfg.get("executor_cards"), dict):
+        return llm_cfg["executor_cards"]
+    if isinstance(cfg.get("llm_cards"), dict):
+        return cfg["llm_cards"]
+    return {}
 
 
 def save_config(config: dict[str, Any]) -> None:

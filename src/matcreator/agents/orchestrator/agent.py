@@ -34,6 +34,7 @@ from ..cancellation import clear_cancellation
 from ...knowledge.extractor import run_knowledge_extractor
 from ...knowledge.synthesizer import run_knowledge_synthesizer
 from ...knowledge.kg_state import increment_exec_count, record_synthesizer_run
+from ..execution_agent.recovery import reconcile_recovery_state
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,12 @@ class PlanningExecutionOrchestrator(BaseAgent):
 
         graph = AgentGraphLogger(ctx.session.id)
         graph.log_node_start("orchestrator", "orchestrator", "Orchestrator")
+
+        # Cheap and idempotent: repair the in-memory graph from durable step
+        # attempt records before planning/execution resumes after a crash.
+        recovered = reconcile_recovery_state(state, state.get("workdir") or get_workspace_root())
+        if recovered:
+            logger.warning("[orchestrator] recovered execution state: %s", recovered)
 
         loop_idx = graph.count_nodes_of_type("execution")
 

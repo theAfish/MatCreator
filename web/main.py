@@ -79,6 +79,7 @@ from matcreator.agents.cancellation import (  # noqa: E402
     request_step_cancellation,
 )
 from matcreator.agents.graph_logger import AgentGraphLogger  # noqa: E402
+from matcreator.agents.session_log import build_session_log_export  # noqa: E402
 from matcreator.skill import ALL_SKILLS, PLANNING_SKILL_NAMES, refresh_skills, get_default_skill_names  # noqa: E402
 from matcreator.config import load_config, save_config, get_disabled_skills  # noqa: E402
 from matcreator.config import ENV_TO_YAML, YAML_TO_ENV, SENSITIVE_YAML_KEYS  # noqa: E402
@@ -650,9 +651,6 @@ def _query_session_summaries(user_id: str | None = None) -> list[dict]:
 
     where_clause = "WHERE app_name = ?"
     params: tuple[str, ...] = (APP_NAME,)
-    if user_id is not None:
-        where_clause += " AND user_id = ?"
-        params = (APP_NAME, user_id)
 
     try:
         with sqlite3.connect(SESSION_DB_PATH) as conn:
@@ -704,6 +702,15 @@ def _load_json_field(raw_value: str | None, fallback):
         return json.loads(raw_value)
     except json.JSONDecodeError:
         return fallback
+
+
+def _ase_read_structure(path: Path):
+    from ase.io import read as ase_read
+
+    name = path.name.lower()
+    if name in {"poscar", "contcar"} or path.suffix.lower() == ".vasp":
+        return ase_read(str(path), format="vasp")
+    return ase_read(str(path))
 
 
 def _load_agent_graph_data(session_id: str) -> dict:
@@ -1398,26 +1405,47 @@ async def get_user_session(user_id: str, session_id: str) -> JSONResponse:
     try:
         with sqlite3.connect(session_db_path) as conn:
             conn.row_factory = sqlite3.Row
-            session = conn.execute(
-                """
-                SELECT app_name, user_id, id, state, create_time, update_time
-                FROM sessions
-                WHERE app_name = ? AND user_id = ? AND id = ?
-                """,
-                (APP_NAME, user_id, session_id),
-            ).fetchone()
+            if _MATCREATOR_MODE == "server":
+                session = conn.execute(
+                    """
+                    SELECT app_name, user_id, id, state, create_time, update_time
+                    FROM sessions
+                    WHERE app_name = ? AND user_id = ? AND id = ?
+                    """,
+                    (APP_NAME, user_id, session_id),
+                ).fetchone()
+            else:
+                session = conn.execute(
+                    """
+                    SELECT app_name, user_id, id, state, create_time, update_time
+                    FROM sessions
+                    WHERE app_name = ? AND id = ?
+                    """,
+                    (APP_NAME, session_id),
+                ).fetchone()
             if session is None:
                 raise HTTPException(status_code=404, detail="Session not found")
 
-            event_rows = conn.execute(
-                """
-                SELECT event_data
-                FROM events
-                WHERE app_name = ? AND user_id = ? AND session_id = ?
-                ORDER BY timestamp ASC
-                """,
-                (APP_NAME, user_id, session_id),
-            ).fetchall()
+            if _MATCREATOR_MODE == "server":
+                event_rows = conn.execute(
+                    """
+                    SELECT event_data
+                    FROM events
+                    WHERE app_name = ? AND user_id = ? AND session_id = ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (APP_NAME, user_id, session_id),
+                ).fetchall()
+            else:
+                event_rows = conn.execute(
+                    """
+                    SELECT event_data
+                    FROM events
+                    WHERE app_name = ? AND session_id = ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (APP_NAME, session_id),
+                ).fetchall()
     except sqlite3.Error as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read session: {exc}")
 
@@ -1521,11 +1549,35 @@ def _load_execution_graph(session_id: str) -> dict:
     return {"nodes": {}, "edges": []}
 
 
+def _load_session_log_export(session_id: str, user_id: str | None = None) -> dict:
+    owner_id, state = _load_session_state(session_id, user_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    payload = build_session_log_export(session_id, state)
+    payload["owner_id"] = owner_id
+    return payload
+
+
 @app.get("/api/execution-graph/{session_id}")
 async def get_execution_graph(session_id: str) -> JSONResponse:
     """Return the execution graph (plan DAG) from session state for frontend visualization."""
     data = _load_execution_graph(session_id)
     return JSONResponse(data)
+
+
+@app.get("/api/sessions/{session_id}/session-log")
+async def download_session_log(
+    session_id: str,
+    user_id: str = Query(default="", description="Current user ID; required to scope server-mode sessions."),
+) -> Response:
+    payload = _load_session_log_export(session_id, user_id or None)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    response = Response(content=content, media_type="application/json")
+    safe_session_id = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="matcreator-session-log-{safe_session_id}.json"'
+    )
+    return response
 
 
 
@@ -1615,7 +1667,6 @@ async def view_structure(
     from io import StringIO
 
     try:
-        from ase.io import read as ase_read
         from ase.io import write as ase_write
     except ImportError:
         raise HTTPException(status_code=500, detail="ASE is not installed")
@@ -1625,7 +1676,7 @@ async def view_structure(
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        atoms = ase_read(str(resolved))
+        atoms = _ase_read_structure(resolved)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Cannot parse structure: {exc}")
 

@@ -485,7 +485,7 @@ class AgentGraphView {
 
     if (this._activeDetailNodeId) {
       if (this._nodeData[this._activeDetailNodeId]) {
-        this._showDetail(this._activeDetailNodeId, { preserveScroll: true });
+        this._showDetail(this._activeDetailNodeId, { preserveScroll: true, scrollToStep: false });
       } else {
         this._hideDetail();
       }
@@ -588,10 +588,7 @@ class AgentGraphView {
     const arts = raw.artifacts || [];
     if (arts.length) {
       arts.forEach((a) => {
-        const li = document.createElement("li");
-        li.textContent = a.split("/").pop();
-        li.title = a;
-        this._detailArtifacts.appendChild(li);
+        this._detailArtifacts.appendChild(createArtifactListItem(a));
       });
     } else {
       const li = document.createElement("li");
@@ -630,6 +627,9 @@ class AgentGraphView {
           pre.style.borderTop = "1px solid rgba(255,255,255,0.06)";
           d.appendChild(pre);
         }
+        getStructurePaths(tc).forEach((path) => {
+          d.appendChild(createStructureViewButton(path));
+        });
         this._detailToolcalls.appendChild(d);
       });
       document.getElementById("detail-toolcalls-row").style.display = "";
@@ -657,7 +657,7 @@ class AgentGraphView {
     }
 
     this._detailEl.classList.remove("hidden");
-    if (raw.type === "step") stepExecutionFeed.highlight(raw.id);
+    if (raw.type === "step" && options.scrollToStep !== false) stepExecutionFeed.highlight(raw.id);
     syncPanelResizerVisibility();
     if (preserveScroll) {
       this._restoreOpenToolCallKeys(prevOpenToolCallKeys);
@@ -690,6 +690,9 @@ class StepExecutionFeed {
     this._liveAnchorEl = null;
     this._liveContainerEl = null;
     this._liveStartedAt = null;
+    this._liveToolHostEl = null;
+    this._stepById = new Map();
+    this._childNodes = new Map();
   }
 
   reset() {
@@ -700,6 +703,9 @@ class StepExecutionFeed {
     this._liveAnchorEl = null;
     this._liveContainerEl = null;
     this._liveStartedAt = null;
+    this._liveToolHostEl = null;
+    this._stepById = new Map();
+    this._childNodes = new Map();
   }
 
   startLiveTurn(anchorEl, startedAt = Date.now()) {
@@ -708,6 +714,7 @@ class StepExecutionFeed {
     this._liveContainerEl = document.createElement("div");
     this._liveContainerEl.className = "step-feed-live-region";
     this._liveContainerEl.dataset.stepLiveRegion = "true";
+    this._liveToolHostEl = null;
 
     if (anchorEl && anchorEl.parentNode === chatArea) {
       chatArea.insertBefore(this._liveContainerEl, anchorEl.nextSibling);
@@ -718,10 +725,23 @@ class StepExecutionFeed {
     return this._liveContainerEl;
   }
 
+  attachLiveToolHost(hostEl) {
+    if (!hostEl || this._liveToolHostEl === hostEl) return;
+    this._liveToolHostEl = hostEl;
+    for (const [nodeId, card] of this._cards.entries()) {
+      const node = this._stepById.get(nodeId);
+      if (node && !this.isRootStep(node)) continue;
+      if (card.dataset.stepStartTime !== undefined) {
+        hostEl.appendChild(card);
+      }
+    }
+  }
+
   finishLiveTurn() {
     this._liveAnchorEl = null;
     this._liveContainerEl = null;
     this._liveStartedAt = null;
+    this._liveToolHostEl = null;
   }
 
   update(graphData) {
@@ -735,6 +755,8 @@ class StepExecutionFeed {
         const tb = b.start_time ? new Date(b.start_time).getTime() : Infinity;
         return ta - tb;
       });
+    this.setHierarchy(steps);
+    const rootSteps = steps.filter((node) => this.isRootStep(node));
 
     const seen = new Set(steps.map((node) => node.id));
     for (const nodeId of this._cards.keys()) {
@@ -745,12 +767,36 @@ class StepExecutionFeed {
     }
 
     const shouldStick = isChatNearBottom();
-    steps.forEach((node) => this._upsert(node));
+    rootSteps.forEach((node) => this._upsert(node));
     if (shouldStick) scrollToBottom();
   }
 
+  setHierarchy(stepNodes) {
+    const steps = Array.isArray(stepNodes) ? stepNodes : [];
+    this._stepById = new Map(steps.map((node) => [node.id, node]));
+    this._childNodes = new Map();
+
+    steps.forEach((node) => {
+      if (!this._stepById.has(node.parent_id)) return;
+      const children = this._childNodes.get(node.parent_id) || [];
+      children.push(node);
+      this._childNodes.set(node.parent_id, children);
+    });
+
+    for (const children of this._childNodes.values()) {
+      children.sort((a, b) => this._stepSortTime(a) - this._stepSortTime(b));
+    }
+  }
+
+  isRootStep(node) {
+    return !this._stepById.has(node?.parent_id);
+  }
+
   _activeLiveContainer() {
-    return this._liveContainerEl && chatArea.contains(this._liveContainerEl)
+    if (this._liveToolHostEl && document.body.contains(this._liveToolHostEl)) {
+      return this._liveToolHostEl;
+    }
+    return this._liveContainerEl && this._liveContainerEl.isConnected
       ? this._liveContainerEl
       : null;
   }
@@ -800,16 +846,33 @@ class StepExecutionFeed {
   }
 
   _placeCard(outer, node) {
+    outer.classList.remove("step-feed-child-message");
     const liveContainer = this._activeLiveContainer();
     if (liveContainer) {
       this._insertIntoLiveContainer(liveContainer, outer, node);
+      return;
+    }
+    if (state.isSending && this._liveContainerEl) {
+      this._insertIntoLiveContainer(this._liveContainerEl, outer, node);
       return;
     }
     this._insertSorted(outer, node);
   }
 
   _stepSortTime(node) {
-    return node.start_time ? new Date(node.start_time).getTime() : Infinity;
+    return node?.start_time ? new Date(node.start_time).getTime() : Infinity;
+  }
+
+  _upsertNested(node, container, ancestors) {
+    let outer = this._cards.get(node.id);
+    if (!outer) {
+      outer = this._createCard(node);
+      this._cards.set(node.id, outer);
+    }
+    outer.classList.add("step-feed-child-message");
+    this._insertIntoLiveContainer(container, outer, node);
+    this._renderCard(outer, node, ancestors);
+    return outer;
   }
 
   _insertIntoLiveContainer(container, outer, node) {
@@ -922,9 +985,12 @@ class StepExecutionFeed {
     return details;
   }
 
-  _renderCard(outer, node) {
+  _renderCard(outer, node, ancestors = new Set([node.id])) {
     outer.dataset.stepNodeId = node.id;
     outer.classList.toggle("step-feed-highlight", this._highlightedId === node.id);
+
+    const bubble = outer.querySelector(".step-feed-bubble");
+    bubble?.querySelector(":scope > .step-feed-child-section")?.remove();
 
     const details = outer.querySelector(".step-feed-details");
     const userChoice = this._userOpen.get(node.id);
@@ -974,6 +1040,27 @@ class StepExecutionFeed {
 
     if (node.input && Object.keys(node.input).length) {
       body.appendChild(this._wireNested(node.id, "input", renderStepInput(node.input)));
+    }
+
+    const childNodes = (this._childNodes.get(node.id) || [])
+      .filter((child) => !ancestors.has(child.id));
+    if (childNodes.length) {
+      const section = document.createElement("div");
+      section.className = "step-feed-section step-feed-child-section";
+      const label = document.createElement("div");
+      label.className = "step-feed-section-title";
+      label.textContent = `Sub-executors (${childNodes.length})`;
+      const childHost = document.createElement("div");
+      childHost.className = "step-feed-child-list";
+      section.append(label, childHost);
+
+      childNodes.forEach((child) => {
+        const nextAncestors = new Set(ancestors);
+        nextAncestors.add(child.id);
+        this._upsertNested(child, childHost, nextAncestors);
+      });
+
+      bubble?.appendChild(section);
     }
 
     const conversation = node.conversation || [];
@@ -1028,10 +1115,7 @@ class StepExecutionFeed {
       const list = document.createElement("ul");
       list.className = "detail-artifacts step-feed-artifacts";
       artifacts.forEach((artifact) => {
-        const li = document.createElement("li");
-        li.textContent = artifact.split("/").pop();
-        li.title = artifact;
-        list.appendChild(li);
+        list.appendChild(createArtifactListItem(artifact));
       });
       section.append(label, list);
       body.appendChild(section);
@@ -1067,6 +1151,9 @@ class ExecutionPlanView {
     this._pollInterval = null;
     this._didInitialFit = false;
     this._structureKey = null;
+    this._subgraphs = [];
+    this._currentIndex = 0;
+    this._hierarchicalMode = true;
     this._init();
   }
 
@@ -1155,6 +1242,68 @@ class ExecutionPlanView {
     };
   }
 
+  _extractConnectedSubgraphs(graphData) {
+    const nodes = graphData.nodes || {};
+    const rawEdges = graphData.edges || [];
+    const nodeIds = Object.keys(nodes);
+    if (nodeIds.length === 0) return [graphData];
+
+    // No edges at all → treat as one graph
+    if (rawEdges.length === 0) return [graphData];
+
+    const adj = {};
+    nodeIds.forEach((id) => { adj[id] = []; });
+    rawEdges.forEach((e) => {
+      const from = Array.isArray(e) ? e[0] : e.from;
+      const to = Array.isArray(e) ? e[1] : e.to;
+      if (adj[from]) adj[from].push(to);
+      if (adj[to]) adj[to].push(from);
+    });
+
+    const visited = new Set();
+    const components = [];
+    for (const id of nodeIds) {
+      if (visited.has(id)) continue;
+      const compIds = new Set();
+      const queue = [id];
+      visited.add(id);
+      while (queue.length) {
+        const cur = queue.shift();
+        compIds.add(cur);
+        for (const nb of (adj[cur] || [])) {
+          if (!visited.has(nb)) {
+            visited.add(nb);
+            queue.push(nb);
+          }
+        }
+      }
+      const compNodes = {};
+      const compEdges = [];
+      for (const cid of compIds) {
+        if (nodes[cid]) compNodes[cid] = nodes[cid];
+      }
+      rawEdges.forEach((e) => {
+        const from = Array.isArray(e) ? e[0] : e.from;
+        const to = Array.isArray(e) ? e[1] : e.to;
+        if (compIds.has(from) || compIds.has(to)) {
+          compEdges.push(e);
+        }
+      });
+      components.push({ nodes: compNodes, edges: compEdges });
+    }
+
+    // Merge all isolated (single-node) components into one group
+    const multi = components.filter((c) => Object.keys(c.nodes).length > 1);
+    const singles = components.filter((c) => Object.keys(c.nodes).length === 1);
+    if (singles.length > 0) {
+      const mergedNodes = {};
+      singles.forEach((c) => Object.assign(mergedNodes, c.nodes));
+      multi.push({ nodes: mergedNodes, edges: [] });
+    }
+
+    return multi.length > 0 ? multi : [graphData];
+  }
+
   update(graphData) {
     if (!graphData || typeof graphData.nodes !== "object") return;
     const nodeEntries = Object.entries(graphData.nodes);
@@ -1166,13 +1315,74 @@ class ExecutionPlanView {
     }
 
     const rawEdges = graphData.edges || [];
-    const nodeIds  = nodeEntries.map(([id]) => id);
-    const levels   = this._computeLevels(nodeIds, rawEdges);
+    const nodeIds = nodeEntries.map(([id]) => id);
 
-    const visNodes = nodeEntries.map(([id, n]) => this._visNode(id, n, levels[id] ?? 0));
+    // Detect structural changes
+    const structureKey = JSON.stringify({ ids: [...nodeIds].sort(), edges: rawEdges });
+    const structureChanged = structureKey !== this._structureKey;
+    if (structureChanged) {
+      this._structureKey = structureKey;
+      this._subgraphs = this._extractConnectedSubgraphs(graphData);
+      this._currentIndex = 0;
+    }
+
+    if (this._subgraphs.length === 0) return;
+    this._renderCurrentSubgraph();
+    this._updateNavUI();
+  }
+
+  _renderCurrentSubgraph() {
+    const sub = this._subgraphs[this._currentIndex];
+    if (!sub) return;
+
+    const nodeEntries = Object.entries(sub.nodes);
+    const rawEdges = sub.edges || [];
+    const nodeIds = nodeEntries.map(([id]) => id);
+    const levels = this._computeLevels(nodeIds, rawEdges);
+    const maxLevel = Math.max(...Object.values(levels), 0);
+    const noHierarchy = maxLevel === 0 && nodeIds.length > 1;
+
+    let visNodes;
+    if (noHierarchy) {
+      if (this._hierarchicalMode !== false) {
+        this._network.setOptions({ layout: { hierarchical: false, randomSeed: 42 } });
+        this._hierarchicalMode = false;
+      }
+      const cols = Math.ceil(Math.sqrt(nodeIds.length));
+      const gapX = 260;
+      const gapY = 55;
+      visNodes = nodeEntries.map(([id, n], i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        return {
+          ...this._visNode(id, n, 0),
+          x: col * gapX,
+          y: row * gapY,
+          fixed: { x: true, y: true },
+        };
+      });
+    } else {
+      if (this._hierarchicalMode !== true) {
+        this._network.setOptions({
+          layout: {
+            hierarchical: {
+              direction: "LR",
+              sortMethod: "directed",
+              nodeSpacing: 120,
+              levelSeparation: 170,
+              blockShifting: true,
+              edgeMinimization: true,
+            },
+          },
+        });
+        this._hierarchicalMode = true;
+      }
+      visNodes = nodeEntries.map(([id, n]) => this._visNode(id, n, levels[id] ?? 0));
+    }
+
     const visEdges = rawEdges.map((e) => {
       const from = Array.isArray(e) ? e[0] : e.from;
-      const to   = Array.isArray(e) ? e[1] : e.to;
+      const to = Array.isArray(e) ? e[1] : e.to;
       return {
         id: `e__${from}__${to}`,
         from,
@@ -1182,11 +1392,6 @@ class ExecutionPlanView {
         smooth: { type: "cubicBezier", forceDirection: "horizontal" },
       };
     });
-
-    // Rebuild via setData so hierarchical layout sees nodes + edges together.
-    // Only fit on very first load; after that preserve the user's camera position.
-    const structureKey = JSON.stringify({ ids: [...nodeIds].sort(), edges: rawEdges });
-    const structureChanged = structureKey !== this._structureKey;
 
     // Save camera before setData resets the layout
     let savedCamera = null;
@@ -1202,12 +1407,9 @@ class ExecutionPlanView {
     this._network.setData({ nodes: new DataSet(visNodes), edges: new DataSet(visEdges) });
 
     if (!this._didInitialFit) {
-      this._structureKey = structureKey;
       this._network.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
       this._didInitialFit = true;
     } else {
-      if (structureChanged) this._structureKey = structureKey;
-      // Restore the user's camera position
       if (savedCamera) {
         this._network.moveTo({
           position: savedCamera.position,
@@ -1215,6 +1417,39 @@ class ExecutionPlanView {
           animation: false,
         });
       }
+    }
+  }
+
+  _updateNavUI() {
+    const counter = document.getElementById("plan-graph-counter");
+    const prevBtn = document.getElementById("plan-graph-prev");
+    const nextBtn = document.getElementById("plan-graph-next");
+    if (this._subgraphs.length <= 1) {
+      if (counter) counter.textContent = "";
+      if (prevBtn) prevBtn.style.display = "none";
+      if (nextBtn) nextBtn.style.display = "none";
+    } else {
+      if (counter) counter.textContent = `Plan Graph ${this._currentIndex + 1} / ${this._subgraphs.length}`;
+      if (prevBtn) { prevBtn.style.display = ""; prevBtn.disabled = this._currentIndex === 0; }
+      if (nextBtn) { nextBtn.style.display = ""; nextBtn.disabled = this._currentIndex >= this._subgraphs.length - 1; }
+    }
+  }
+
+  goPrev() {
+    if (this._currentIndex > 0) {
+      this._currentIndex--;
+      this._didInitialFit = false;
+      this._renderCurrentSubgraph();
+      this._updateNavUI();
+    }
+  }
+
+  goNext() {
+    if (this._currentIndex < this._subgraphs.length - 1) {
+      this._currentIndex++;
+      this._didInitialFit = false;
+      this._renderCurrentSubgraph();
+      this._updateNavUI();
     }
   }
 
@@ -1245,9 +1480,25 @@ class ExecutionPlanView {
 
   reset() {
     this._currentSessionId = null;
+    this._hierarchicalMode = true;
+    this._network?.setOptions({
+      layout: {
+        hierarchical: {
+          direction: "LR",
+          sortMethod: "directed",
+          nodeSpacing: 120,
+          levelSeparation: 170,
+          blockShifting: true,
+          edgeMinimization: true,
+        },
+      },
+    });
     this._network?.setData({ nodes: new DataSet([]), edges: new DataSet([]) });
     this._didInitialFit = false;
     this._structureKey = null;
+    this._subgraphs = [];
+    this._currentIndex = 0;
+    this._updateNavUI();
     this.stopPolling();
   }
 
@@ -1327,6 +1578,8 @@ planGraphCloseBtn?.addEventListener("click", hidePlanGraph);
 document.getElementById("plan-graph-zoom-in")?.addEventListener("click", () => planGraph.zoomIn());
 document.getElementById("plan-graph-zoom-out")?.addEventListener("click", () => planGraph.zoomOut());
 document.getElementById("plan-graph-fit")?.addEventListener("click", () => planGraph.fitToView());
+document.getElementById("plan-graph-prev")?.addEventListener("click", () => planGraph.goPrev());
+document.getElementById("plan-graph-next")?.addEventListener("click", () => planGraph.goNext());
 // ---------------------------------------------------------------------------
 
 function isMobileLayout() {
@@ -1384,6 +1637,28 @@ function refreshGraphAndStructureLayout() {
       // ignore transient resize/render issues
     }
   }
+}
+
+function setStructureViewerActive(active) {
+  if (!graphColumn || !graphViewport) return;
+  graphColumn.classList.toggle("structure-active", active);
+
+  if (active) {
+    if (graphViewport.dataset.preStructureHeight === undefined) {
+      graphViewport.dataset.preStructureHeight = graphViewport.style.height || "";
+    }
+    applyTargetHeight(graphViewport, Math.min(getTargetHeight(graphViewport), 260));
+  } else if (graphViewport.dataset.preStructureHeight !== undefined) {
+    const previousHeight = graphViewport.dataset.preStructureHeight;
+    if (previousHeight) {
+      graphViewport.style.height = previousHeight;
+    } else {
+      graphViewport.style.removeProperty("height");
+    }
+    delete graphViewport.dataset.preStructureHeight;
+  }
+
+  refreshGraphAndStructureLayout();
 }
 
 function syncPanelResizerVisibility() {
@@ -1639,6 +1914,16 @@ function hideLoginModal() {
 function renderUserDisplay() {
   const label = state.displayName || state.userId;
   userDisplay.textContent = state.isAdmin ? `${label} (admin)` : label;
+}
+
+function canWriteActiveSession() {
+  return state.deploymentMode === "local" || !state.activeSessionUserId || state.activeSessionUserId === state.userId;
+}
+
+function activeSessionBackendUserId() {
+  return state.deploymentMode === "local"
+    ? (state.activeSessionUserId || state.userId)
+    : state.userId;
 }
 
 async function refreshAccess() {
@@ -1920,6 +2205,16 @@ function renderSessionList(sessions) {
       content.textContent = state.isAdmin ? `${owner} / ${s.id}` : s.id;
       li.appendChild(content);
 
+      const logBtn = document.createElement("button");
+      logBtn.className = "session-item-log";
+      logBtn.textContent = "LOG JSON";
+      logBtn.title = "Download full session log";
+      logBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        downloadSessionLog(s.id, owner);
+      });
+      li.appendChild(logBtn);
+
       const delBtn = document.createElement("button");
       delBtn.className = "session-item-delete";
       delBtn.textContent = "×";
@@ -2022,6 +2317,31 @@ async function deleteSession(sessionId) {
 }
 
 refreshSessionsBtn.addEventListener("click", (e) => { e.stopPropagation(); loadSessions(); });
+
+async function downloadSessionLog(sessionId, owner = state.userId) {
+  if (!sessionId) return;
+  const userQuery = owner || state.userId;
+  const query = userQuery ? `?user_id=${encodeURIComponent(userQuery)}` : "";
+  const url = `/api/sessions/${encodeURIComponent(sessionId)}/session-log${query}`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(msg || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `matcreator-session-log-${sessionId}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (err) {
+    console.warn("Failed to download session log", err);
+  }
+}
 
 document.getElementById("refresh-files").addEventListener("click", (e) => { e.stopPropagation(); refreshSessionFiles(); });
 
@@ -2244,6 +2564,62 @@ function getPlotPaths(response) {
   return paths;
 }
 
+function getStructurePaths(payload) {
+  const paths = [];
+  const add = (path) => {
+    if (typeof path === "string" && path && !paths.includes(path)) paths.push(path);
+  };
+  const visit = (value, key = "") => {
+    if (!value) return;
+    if (key === "structure_path") {
+      add(value);
+      return;
+    }
+    if (key === "structure_paths" && Array.isArray(value)) {
+      value.forEach(add);
+      return;
+    }
+    if ((key === "artifacts" || key === "artifact_paths") && Array.isArray(value)) {
+      value.forEach((path) => {
+        if (classifyPath(String(path)) === "structure") add(path);
+      });
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, key));
+      return;
+    }
+    if (typeof value === "object") {
+      Object.entries(value).forEach(([childKey, childValue]) => visit(childValue, childKey));
+    }
+  };
+  visit(payload);
+  return paths;
+}
+
+function createStructureViewButton(path) {
+  const btn = document.createElement("button");
+  btn.className = "ghost structure-view-btn";
+  btn.textContent = `🔬 View: ${path.split("/").pop()}`;
+  btn.addEventListener("click", () => openViewer({ path, url: pathToApiUrl(path) }));
+  return btn;
+}
+
+function createArtifactListItem(path) {
+  const li = document.createElement("li");
+  li.title = path;
+  if (classifyPath(path) === "structure") {
+    li.appendChild(createStructureViewButton(path));
+  } else {
+    li.textContent = path.split("/").pop();
+  }
+  return li;
+}
+
+function isExecutorLauncherTool(name) {
+  return ["run_flash_step", "run_node_executor", "run_sub_agent"].includes(name || "");
+}
+
 // Render a typed timeline array into a container element, mirroring
 // Streamlit's render_stream_timeline: thoughts and tool calls go into
 // collapsible <details> blocks; text parts render as markdown;
@@ -2267,11 +2643,23 @@ function renderTimeline(container, timeline, shownPlotPaths = null) {
     } else if (item.type === "function_call") {
       const details = document.createElement("details");
       details.className = "timeline-function-call";
+      if (isExecutorLauncherTool(item.name)) details.open = true;
       const summary = document.createElement("summary");
       summary.innerHTML = `<span class="timeline-badge badge-in">IN</span> ${item.name}`;
       details.appendChild(summary);
       details.appendChild(createJsonBlock(JSON.stringify(item.args, null, 2)));
       container.appendChild(details);
+      if (isExecutorLauncherTool(item.name)) {
+        const inlineHost = document.createElement("div");
+        inlineHost.className = "step-feed-inline-region";
+        inlineHost.dataset.stepInlineHost = item.name;
+        container.appendChild(inlineHost);
+        if (Array.isArray(item.stepNodes) && item.stepNodes.length) {
+          item.stepNodes.forEach((node) => stepExecutionFeed.appendStatic(node, inlineHost));
+        } else if (state.isSending) {
+          stepExecutionFeed.attachLiveToolHost(inlineHost);
+        }
+      }
     } else if (item.type === "function_response") {
       const details = document.createElement("details");
       details.className = "timeline-function-response";
@@ -2292,19 +2680,13 @@ function renderTimeline(container, timeline, shownPlotPaths = null) {
         img.src = pathToApiUrl(plotPath);
         img.className = "timeline-image";
         img.alt = plotPath.split("/").pop();
+        img.style.cursor = "zoom-in";
+        img.addEventListener("click", () => lightbox.open(img.src));
         container.appendChild(img);
       }
-      // Render inline "View Structure" button for structure tool responses
-      if (item.response && item.response.structure_path) {
-        const btn = document.createElement("button");
-        btn.className = "ghost structure-view-btn";
-        btn.textContent = `🔬 View: ${item.response.structure_path.split("/").pop()}`;
-        btn.addEventListener("click", () => openViewer({
-          path: item.response.structure_path,
-          url: pathToApiUrl(item.response.structure_path),
-        }));
-        container.appendChild(btn);
-      }
+      getStructurePaths(item.response).forEach((path) => {
+        container.appendChild(createStructureViewButton(path));
+      });
     } else if (item.type === "text") {
       const div = document.createElement("div");
       div.className = "markdown-content";
@@ -2387,6 +2769,9 @@ function renderStepToolCall(tc) {
     pre.style.borderTop = "1px solid rgba(255,255,255,0.06)";
     details.appendChild(pre);
   }
+  getStructurePaths(tc).forEach((path) => {
+    details.appendChild(createStructureViewButton(path));
+  });
   return details;
 }
 
@@ -2778,7 +3163,7 @@ async function uploadFilesToSession(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return;
   if (!state.userId) { showLoginModal(); return; }
-  if (state.activeSessionUserId && state.activeSessionUserId !== state.userId) {
+  if (!canWriteActiveSession()) {
     addMessage("agent", `Admin view is read-only for ${state.activeSessionUserId}'s session.`);
     return;
   }
@@ -2824,7 +3209,7 @@ async function uploadFilesToSession(fileList) {
 
 async function createSession() {
   state.activeSessionUserId = state.userId;
-  const url = `/apps/${APP_NAME}/users/${state.userId}/sessions/${state.sessionId}`;
+  const url = `/apps/${APP_NAME}/users/${activeSessionBackendUserId()}/sessions/${state.sessionId}`;
   const defaultWorkdir = (state.defaultWorkdir || "").trim();
   const sessionWorkdir = state.customWorkdir || defaultWorkdir;
   try {
@@ -2949,7 +3334,7 @@ knowledgeReviewBanner?.addEventListener("click", () => {
 
 async function patchSessionAgentMode(mode) {
   if (!state.sessionReady || !state.sessionId) return;
-  const url = `/apps/${APP_NAME}/users/${encodeURIComponent(state.userId)}/sessions/${encodeURIComponent(state.sessionId)}`;
+  const url = `/apps/${APP_NAME}/users/${encodeURIComponent(activeSessionBackendUserId())}/sessions/${encodeURIComponent(state.sessionId)}`;
   try {
     const delta = { agent_mode: mode, benchmark_mode: mode === "bench" };
     const resp = await fetch(url, {
@@ -3011,6 +3396,15 @@ function buildSessionTimeline(events, stepNodes) {
   return timeline;
 }
 
+function assignStepNodesToExecutorCalls(timeline, pendingStepNodes) {
+  for (const item of timeline) {
+    if (item.type !== "function_call" || !isExecutorLauncherTool(item.name)) continue;
+    const nextStep = pendingStepNodes.shift();
+    if (nextStep) item.stepNodes = [nextStep];
+  }
+  return timeline;
+}
+
 function collectFunctionResponsesById(events) {
   const frById = {};
   for (const event of events) {
@@ -3022,7 +3416,7 @@ function collectFunctionResponsesById(events) {
   return frById;
 }
 
-function eventToTimelineParts(event, frById) {
+function eventToTimelineParts(event, frById, pairedResponseIds = new Set()) {
   const parts = event.content?.parts || [];
   const evtTimeline = [];
   let accText = "";
@@ -3040,6 +3434,7 @@ function eventToTimelineParts(event, frById) {
         args: fc.args || {},
       });
       if (matchedFr) {
+        if (matchedFr.id) pairedResponseIds.add(matchedFr.id);
         evtTimeline.push({
           type: "function_response",
           id: matchedFr.id,
@@ -3049,6 +3444,7 @@ function eventToTimelineParts(event, frById) {
       }
     } else if (getFunctionResponse(part)) {
       const fr = getFunctionResponse(part);
+      if (fr.id && pairedResponseIds.has(fr.id)) continue;
       const alreadyMatched = evtTimeline.some(
         (item) => item.type === "function_response" && item.id === fr.id
       );
@@ -3077,19 +3473,22 @@ function eventToTimelineParts(event, frById) {
 function renderSessionTimeline(events, stepNodes) {
   chatArea.innerHTML = "";
   stepExecutionFeed.reset();
+  stepExecutionFeed.setHierarchy(stepNodes || []);
 
-  const timeline = buildSessionTimeline(events, stepNodes);
+  const sortedEvents = (events || [])
+    .map((event, idx) => ({ event, ts: eventTimestamp(event, idx), order: idx }))
+    .sort((a, b) => a.ts - b.ts || a.order - b.order)
+    .map((item) => item.event);
+  const pendingStepNodes = (stepNodes || [])
+    .filter((node) => stepExecutionFeed.isRootStep(node))
+    .slice()
+    .sort((a, b) => stepNodeTimestamp(a) - stepNodeTimestamp(b));
   const frById = collectFunctionResponsesById(events);
+  const pairedResponseIds = new Set();
   let shownPlotPaths = new Set();
   let msgIdx = 0;
 
-  for (const item of timeline) {
-    if (item.type === "step") {
-      stepExecutionFeed.appendStatic(item.data);
-      continue;
-    }
-
-    const event = item.data;
+  for (const event of sortedEvents) {
     const role = event.author === "user" ? "user" : "agent";
     if (role === "user") {
       const text = displayMessageFromStoredUserText(
@@ -3100,11 +3499,16 @@ function renderSessionTimeline(events, stepNodes) {
       continue;
     }
 
-    const evtTimeline = eventToTimelineParts(event, frById);
+    const evtTimeline = assignStepNodesToExecutorCalls(
+      eventToTimelineParts(event, frById, pairedResponseIds),
+      pendingStepNodes,
+    );
     if (evtTimeline.length > 0) {
       addAgentTimelineMessage(evtTimeline, shownPlotPaths, msgIdx++);
     }
   }
+
+  pendingStepNodes.forEach((node) => stepExecutionFeed.appendStatic(node));
 }
 
 function updateSessionWorkdirDisplay(sessionData) {
@@ -3125,6 +3529,9 @@ async function loadSession(sessionId) {
       return;
     }
     state.sessionReady = true;
+    if (state.deploymentMode === "local" && sessionData.userId) {
+      state.activeSessionUserId = sessionData.userId;
+    }
     const events = sessionData.events || [];
     const graphNodes = await fetchSessionStepNodes(sessionId);
     renderSessionTimeline(events, graphNodes);
@@ -3192,14 +3599,22 @@ function upsertTimelineText(timeline, text) {
   if (text) timeline.push({ type: "text", text });
 }
 
+function timelineEventKey(event) {
+  if (event.id) return `${event.type}:${event.id}`;
+  const payload = event.type === "function_call" ? event.args : event.response;
+  return `${event.type}:${event.name || "Unknown"}:${JSON.stringify(payload || {})}`;
+}
+
 function upsertTimelineEvent(timeline, event) {
-  const { id: eventId, type: eventType } = event;
-  if (eventId) {
-    for (let i = 0; i < timeline.length; i++) {
-      if (timeline[i].type === eventType && timeline[i].id === eventId) {
-        timeline[i] = event;
-        return;
-      }
+  const eventKey = timelineEventKey(event);
+  for (let i = 0; i < timeline.length; i++) {
+    const item = timeline[i];
+    if (
+      (item.type === "function_call" || item.type === "function_response") &&
+      timelineEventKey(item) === eventKey
+    ) {
+      timeline[i] = event;
+      return;
     }
   }
   const last = timeline[timeline.length - 1];
@@ -3253,7 +3668,7 @@ async function sendMessage(message) {
   if (!message.trim()) return;
   if (state.isSending) return;
   if (!state.userId) { showLoginModal(); return; }
-  if (state.activeSessionUserId && state.activeSessionUserId !== state.userId) {
+  if (!canWriteActiveSession()) {
     addMessage("agent", `Admin view is read-only for ${state.activeSessionUserId}'s session.`);
     return;
   }
@@ -3286,7 +3701,7 @@ async function sendMessage(message) {
   setSendingState(true, controller);
   const payload = {
     app_name: APP_NAME,
-    user_id: state.userId,
+    user_id: activeSessionBackendUserId(),
     session_id: state.sessionId,
     new_message: {
       role: "user",
@@ -3408,9 +3823,11 @@ async function sendMessage(message) {
 async function openViewer(item) {
   graphDetail.classList.add("hidden");
   structureViewer.classList.remove("hidden");
+  setStructureViewerActive(true);
   syncPanelResizerVisibility();
   svCanvas.innerHTML = '<div style="color:var(--muted);padding:16px;font-size:13px">Loading…</div>';
   svMeta.textContent = "";
+  structureViewer.scrollIntoView({ block: "nearest" });
 
   try {
     const resp = await fetch(`/api/structure/view?path=${encodeURIComponent(item.path)}&session_id=${encodeURIComponent(state.sessionId || "")}`);
@@ -3456,6 +3873,7 @@ async function openViewer(item) {
 
 svClose.addEventListener("click", () => {
   structureViewer.classList.add("hidden");
+  setStructureViewerActive(false);
   syncPanelResizerVisibility();
   state.structure3dViewer = null;
   svCanvas.innerHTML = "";
@@ -3484,6 +3902,8 @@ async function openFileViewer(file) {
     const img = document.createElement("img");
     img.src = url;
     img.alt = file.name;
+    img.style.cursor = "zoom-in";
+    img.addEventListener("click", () => lightbox.open(url));
     wrap.appendChild(img);
     content.innerHTML = "";
     content.appendChild(wrap);
@@ -3514,6 +3934,114 @@ document.getElementById("fv-close")?.addEventListener("click", () => {
 document.getElementById("file-viewer-modal")?.addEventListener("click", (e) => {
   if (e.target === e.currentTarget)
     e.currentTarget.classList.add("hidden");
+});
+
+// ---------------------------------------------------------------------------
+// Image lightbox
+// ---------------------------------------------------------------------------
+
+const lightbox = {
+  el: document.getElementById("image-lightbox"),
+  img: document.getElementById("lightbox-img"),
+  viewport: document.getElementById("lightbox-viewport"),
+  label: document.getElementById("lightbox-zoom-label"),
+  _scale: 1,
+  _tx: 0,
+  _ty: 0,
+  _dragging: false,
+  _dragStartX: 0,
+  _dragStartY: 0,
+  _dragStartTx: 0,
+  _dragStartTy: 0,
+
+  open(src) {
+    this._scale = 1;
+    this._tx = 0;
+    this._ty = 0;
+    this.img.src = src;
+    this.img.style.transform = "";
+    this.el.classList.remove("hidden");
+    this._updateLabel();
+  },
+
+  close() {
+    this.el.classList.add("hidden");
+    this.img.src = "";
+  },
+
+  _apply() {
+    this.img.style.transform = `translate(${this._tx}px, ${this._ty}px) scale(${this._scale})`;
+    this._updateLabel();
+  },
+
+  _updateLabel() {
+    if (this.label) this.label.textContent = `${Math.round(this._scale * 100)}%`;
+  },
+
+  zoomIn() {
+    this._scale = Math.min(this._scale * 1.3, 20);
+    this._apply();
+  },
+
+  zoomOut() {
+    const newScale = this._scale / 1.3;
+    if (newScale < 0.1) return;
+    const oldScale = this._scale;
+    this._scale = newScale;
+    const factor = this._scale / oldScale;
+    this._tx *= factor;
+    this._ty *= factor;
+    this._apply();
+  },
+
+  resetZoom() {
+    this._scale = 1;
+    this._tx = 0;
+    this._ty = 0;
+    this._apply();
+  },
+};
+
+lightbox.viewport?.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  if (e.deltaY < 0) lightbox.zoomIn();
+  else lightbox.zoomOut();
+}, { passive: false });
+
+lightbox.viewport?.addEventListener("mousedown", (e) => {
+  if (e.target === lightbox.img) {
+    lightbox._dragging = true;
+    lightbox._dragStartX = e.clientX;
+    lightbox._dragStartY = e.clientY;
+    lightbox._dragStartTx = lightbox._tx;
+    lightbox._dragStartTy = lightbox._ty;
+    e.preventDefault();
+  }
+});
+
+document.addEventListener("mousemove", (e) => {
+  if (!lightbox._dragging) return;
+  lightbox._tx = lightbox._dragStartTx + (e.clientX - lightbox._dragStartX);
+  lightbox._ty = lightbox._dragStartTy + (e.clientY - lightbox._dragStartY);
+  lightbox._apply();
+});
+
+document.addEventListener("mouseup", () => {
+  lightbox._dragging = false;
+});
+
+// Click on viewport backdrop (not the image) to close
+lightbox.viewport?.addEventListener("click", (e) => {
+  if (e.target === lightbox.viewport) lightbox.close();
+});
+
+document.getElementById("lightbox-close")?.addEventListener("click", () => lightbox.close());
+document.getElementById("lightbox-zoom-in")?.addEventListener("click", () => lightbox.zoomIn());
+document.getElementById("lightbox-zoom-out")?.addEventListener("click", () => lightbox.zoomOut());
+document.getElementById("lightbox-zoom-reset")?.addEventListener("click", () => lightbox.resetZoom());
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !lightbox.el.classList.contains("hidden")) lightbox.close();
 });
 
 initPanelResizers();

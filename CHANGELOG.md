@@ -2,6 +2,100 @@
 
 <!-- version list -->
 
+## v2.5.0 (2026-07-01)
+
+### Bug Fixes
+
+- Improve the pop up window for the plan graph
+  ([`4b407d6`](https://github.com/AI4MS/MatCreator/commit/4b407d6406352d7ef618dbb6d340c20bfc5101f4))
+
+- Local user has full access to session logs
+  ([`9ecc047`](https://github.com/AI4MS/MatCreator/commit/9ecc047ad8a908adad32f35d2bf3034df655ed28))
+
+### Features
+
+- Add llm cards
+  ([`1e97a26`](https://github.com/AI4MS/MatCreator/commit/1e97a26299c8d7075b0d99f9efa54258d2473768))
+
+
+## v2.4.0 (2026-06-30)
+
+### Bug Fixes
+
+- Auto-wrap executor title on card expand, keep triangle aligned to first line
+  ([`be8e8fa`](https://github.com/AI4MS/MatCreator/commit/be8e8faf00e77ed779687fccbb17e50f6690320c))
+
+- Improve front end UI
+  ([`85cc466`](https://github.com/AI4MS/MatCreator/commit/85cc466f99b2aba6db8dae8766194c42c9487df2))
+
+- Issue with the ordering of sub-executor
+  ([`7556ef5`](https://github.com/AI4MS/MatCreator/commit/7556ef5636ed00ef3eeffe2a003e107764274f07))
+
+### Features
+
+- Add crash recovery support
+  ([`f1671d5`](https://github.com/AI4MS/MatCreator/commit/f1671d51bb92351a5d73719b10801da9f4b70f1b))
+
+- Image lightbox with zoom, pan, and drag for file viewer and chat images
+  ([`60cc250`](https://github.com/AI4MS/MatCreator/commit/60cc250b6f334dc59209cf904a30b5416f6ec52f))
+
+- Split plan graph into navigable subgraphs; fallback to manual grid when no edges
+  ([`039a8cc`](https://github.com/AI4MS/MatCreator/commit/039a8ccf553363ee29976dcb1910e63b7a7f503e))
+
+- Unify the session log
+  ([`cf5a531`](https://github.com/AI4MS/MatCreator/commit/cf5a531384a9c19caa87643a31765a02810a3435))
+
+
+## v2.3.0 (2026-06-29)
+
+### Bug Fixes
+
+- Frontend CLI now support login bash
+  ([`29d3756`](https://github.com/AI4MS/MatCreator/commit/29d3756f201768cc00a7905f7bf211cc3688755c))
+
+- Refactor the frontend
+  ([`7e89724`](https://github.com/AI4MS/MatCreator/commit/7e897246eec58d0992e343856d5842bd1159e105))
+
+- Too many details in search_skills
+  ([`00ee005`](https://github.com/AI4MS/MatCreator/commit/00ee0052408cd97a5692fe6e1c4228a23f004cb8))
+
+- Update docker file
+  ([`fedcd4e`](https://github.com/AI4MS/MatCreator/commit/fedcd4e768076de4b16b99bf828ed5749b2420c4))
+
+- Update dockerfile
+  ([`aab59ba`](https://github.com/AI4MS/MatCreator/commit/aab59ba242dc0d4e6f94a622dca85661f8e3bc05))
+
+### Documentation
+
+- **cli**: Expand help text and add metavar to CLI arguments
+  ([`1b61f50`](https://github.com/AI4MS/MatCreator/commit/1b61f5031048d0e8cc1dc756ba22356f2460fa04))
+
+- **ports**: Document port configuration in deployment guides
+  ([`cd62c9e`](https://github.com/AI4MS/MatCreator/commit/cd62c9e55db555d0d8c91ba717ff433d84cb67e6))
+
+### Features
+
+- Add rounded favicon for browser tab
+  ([`8779245`](https://github.com/AI4MS/MatCreator/commit/8779245003d004178fe3e22a39ccfdda55253d9f))
+
+- **deploy**: Make Docker Compose and nginx ports configurable
+  ([`d6f9333`](https://github.com/AI4MS/MatCreator/commit/d6f933365ddf14ea27c0f6156ac010e1d2143158))
+
+- **ports**: Add centralized port configuration module
+  ([`0060073`](https://github.com/AI4MS/MatCreator/commit/0060073cb2098dee18230038bc647cf06dfec56a))
+
+- **ports**: Add configurable host resolution for core services
+  ([`0b4f885`](https://github.com/AI4MS/MatCreator/commit/0b4f885eae715744b64b563bff3ecba86582d0aa))
+
+- **ports**: Wire port config into application code
+  ([`81b6f23`](https://github.com/AI4MS/MatCreator/commit/81b6f236d0badaf60a24a74a64fe5f2cba8e0be6))
+
+### Testing
+
+- **ports**: Add comprehensive port configuration tests
+  ([`206373d`](https://github.com/AI4MS/MatCreator/commit/206373d527dec3b4e37deb66689c98b18ab7eb28))
+
+
 ## v2.2.0 (2026-06-25)
 
 ### Bug Fixes

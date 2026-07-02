@@ -18,6 +18,14 @@ Build workflows, generate structures, run simulations, and continuously acquire 
 
 </p>
 
+<p align="center">
+  <a href="https://ai4ms.github.io/MatCreator/"><b>Documentation</b></a>
+  ·
+  <a href="#quick-start"><b>Quick Start</b></a>
+  ·
+  <a href="#launch"><b>Launch</b></a>
+</p>
+
 ---
 
 ## ✨ Features
@@ -105,7 +113,7 @@ By default, `matcreator chat` starts in Flash mode for fast direct interaction. 
 
 ## Documentation
 
-Detailed installation, configuration, and deployment instructions will live on the GitHub Pages documentation site: [ai4ms.github.io/MatCreator](https://ai4ms.github.io/MatCreator/).
+Full installation, configuration, and deployment documentation is available at [ai4ms.github.io/MatCreator](https://ai4ms.github.io/MatCreator/).
 
 ---
 

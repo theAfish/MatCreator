@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import List, Literal, Optional
 
 from google.adk.agents import LlmAgent
@@ -11,7 +10,7 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from ...constants import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from ...llm_cards import LLMCard
 from ...skill import ALL_SKILLS_TOOLSET
 from ...knowledge.query import get_related_skills, search_skill_context, search_skills
 from ...tools.remoteagent_tool import load_remote_a2a_agents
@@ -20,9 +19,7 @@ from ...tools.workspace_tools import get_user_skills_root, run_bash, run_python
 
 logger = logging.getLogger(__name__)
 
-_model_name = os.environ.get("LLM_MODEL", LLM_MODEL)
-_model_api_key = os.environ.get("LLM_API_KEY", LLM_API_KEY)
-_model_base_url = os.environ.get("LLM_BASE_URL", LLM_BASE_URL)
+STEP_EXECUTOR_AGENT_NAME = "step_executor"
 
 
 class StepExecutorInput(BaseModel):
@@ -193,32 +190,34 @@ def submit_step_result(
         return {"status": "error", "message": f"Unexpected error: {exc}"}
 
 
-step_executor_agent = LlmAgent(
-    name="step_executor",
-    model=LiteLlm(
-        model=_model_name,
-        base_url=_model_base_url,
-        api_key=_model_api_key,
-    ),
-    description=(
-        "Executes a single plan step in an isolated session. "
-        "Receives structured input with action and skill name; loads skill instructions autonomously."
-    ),
-    instruction=_STEP_EXECUTOR_INSTRUCTION,
-    input_schema=StepExecutorInput,
-    tools=[
-        FunctionTool(run_sub_agent),
-        FunctionTool(submit_step_result),
-        FunctionTool(search_skills),
-        FunctionTool(search_skill_context),
-        FunctionTool(get_related_skills),
-        FunctionTool(get_user_skills_root),
-        FunctionTool(run_python),
-        FunctionTool(run_bash),
-        ALL_SKILLS_TOOLSET,
-        FunctionTool(show_plot),
-        FunctionTool(show_structure),
-        FunctionTool(show_artifact),
-    ],
-    sub_agents=load_remote_a2a_agents(),
-)
+def build_step_executor_agent(llm_card: LLMCard) -> LlmAgent:
+    """Build a step executor agent for one executor invocation."""
+    return LlmAgent(
+        name=STEP_EXECUTOR_AGENT_NAME,
+        model=LiteLlm(
+            model=llm_card.model,
+            base_url=llm_card.base_url,
+            api_key=llm_card.api_key,
+        ),
+        description=(
+            "Executes a single plan step in an isolated session. "
+            "Receives structured input with action and skill name; loads skill instructions autonomously."
+        ),
+        instruction=_STEP_EXECUTOR_INSTRUCTION,
+        input_schema=StepExecutorInput,
+        tools=[
+            FunctionTool(run_sub_agent),
+            FunctionTool(submit_step_result),
+            FunctionTool(search_skills),
+            FunctionTool(search_skill_context),
+            FunctionTool(get_related_skills),
+            FunctionTool(get_user_skills_root),
+            FunctionTool(run_python),
+            FunctionTool(run_bash),
+            ALL_SKILLS_TOOLSET,
+            FunctionTool(show_plot),
+            FunctionTool(show_structure),
+            FunctionTool(show_artifact),
+        ],
+        sub_agents=load_remote_a2a_agents(),
+    )
