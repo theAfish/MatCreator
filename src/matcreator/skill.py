@@ -341,10 +341,19 @@ def seed_skills_to_graph() -> dict:
         )
         seeded += int(created)
 
-    # Create dependency edges from dependent_skills metadata
+    # Create edges from dependent_skills metadata. For L3/L4 nodes this field
+    # means "attached parent skills" so progressive retrieval can scope them.
     edges_created = 0
     for skill in ALL_SKILLS:
-        deps = (skill.frontmatter.metadata or {}).get("dependent_skills", [])
+        metadata = skill.frontmatter.metadata or {}
+        deps = metadata.get("dependent_skills", [])
+        entry_type_value = metadata.get("entry_type") or metadata.get("type")
+        skill_level_value = metadata.get("skill_level")
+        relation = EdgeRelation.dependency
+        if entry_type_value == "heuristic" or skill_level_value == "L3":
+            relation = EdgeRelation.heuristic_for
+        elif entry_type_value == "constraint" or skill_level_value == "L4":
+            relation = EdgeRelation.constraint_on
         src_id = skill_node_ids.get(skill.name)
         for dep_name in deps:
             tgt_id = skill_node_ids.get(dep_name)
@@ -354,7 +363,7 @@ def seed_skills_to_graph() -> dict:
                         kg,
                         src_id,
                         tgt_id,
-                        relation=EdgeRelation.dependency,
+                        relation=relation,
                     )
                 )
             else:

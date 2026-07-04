@@ -4000,10 +4000,12 @@ function ensureStructureTab(item) {
 }
 
 const SKILL_GRAPH_COLORS = {
+  basic: { background: "#3B82F6", border: "#2563EB", highlight: { background: "#60A5FA", border: "#93C5FD" } },
   capability: { background: "#3B82F6", border: "#2563EB", highlight: { background: "#60A5FA", border: "#93C5FD" } },
-  workflow: { background: "#8B5CF6", border: "#7C3AED", highlight: { background: "#A78BFA", border: "#C4B5FD" } },
-  procedure: { background: "#10B981", border: "#059669", highlight: { background: "#34D399", border: "#6EE7B7" } },
+  workflow: { background: "#14B8A6", border: "#0F766E", highlight: { background: "#2DD4BF", border: "#5EEAD4" } },
+  procedure: { background: "#14B8A6", border: "#0F766E", highlight: { background: "#2DD4BF", border: "#5EEAD4" } },
   heuristic: { background: "#F59E0B", border: "#D97706", highlight: { background: "#FBBF24", border: "#FDE68A" } },
+  limitation: { background: "#EF4444", border: "#DC2626", highlight: { background: "#F87171", border: "#FCA5A5" } },
   constraint: { background: "#EF4444", border: "#DC2626", highlight: { background: "#F87171", border: "#FCA5A5" } },
   tool: { background: "#06B6D4", border: "#0891B2", highlight: { background: "#22D3EE", border: "#67E8F9" } },
   generic: { background: "#475569", border: "#64748B", highlight: { background: "#64748B", border: "#94A3B8" } },
@@ -4023,8 +4025,9 @@ function rgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function skillGraphNodeColor(type, enabled = true) {
-  const color = SKILL_GRAPH_COLORS[type] || SKILL_GRAPH_COLORS.generic;
+function skillGraphNodeColor(type, enabled = true, skillLevel = null) {
+  const kind = skillGraphNodeKindFor(type, skillLevel).value;
+  const color = SKILL_GRAPH_COLORS[kind] || SKILL_GRAPH_COLORS[type] || SKILL_GRAPH_COLORS.generic;
   if (enabled !== false) return color;
   return {
     background: rgba(color.background, 0.28),
@@ -4222,6 +4225,18 @@ function createSkillGraphLinks(nodeId) {
   return list;
 }
 
+function skillGraphAttachedContextFacts(nodeId) {
+  const edges = skillGraphTab?.edges || [];
+  const heuristics = edges.filter((edge) => edge.to === nodeId && edge.relation === "heuristic_for").length;
+  const limitations = edges.filter((edge) => (
+    edge.to === nodeId && (edge.relation === "constraint_on" || edge.relation === "warning_about")
+  )).length;
+  return createSkillGraphFacts([
+    ["Heuristics", heuristics],
+    ["Limitations", limitations],
+  ]);
+}
+
 function csvToList(value) {
   return String(value || "")
     .split(",")
@@ -4244,8 +4259,84 @@ function skillGraphEntryTypes() {
   return ["capability", "procedure", "workflow", "tool", "repository", "environment", "dependency", "data", "analytical", "heuristic", "constraint", "generic"];
 }
 
-function skillGraphSkillLevels() {
-  return ["L1", "L2", "L3", "L4"];
+const SKILL_GRAPH_NODE_KINDS = [
+  {
+    value: "basic",
+    label: "Basic",
+    entry_type: "capability",
+    skill_level: "L1",
+    hint: "General skill or concept node.",
+  },
+  {
+    value: "workflow",
+    label: "Workflow",
+    entry_type: "workflow",
+    skill_level: "L2",
+    hint: "A multi-step procedure or task flow.",
+  },
+  {
+    value: "heuristic",
+    label: "Heuristic",
+    entry_type: "heuristic",
+    skill_level: "L3",
+    hint: "A practical rule, preference, or decision guide.",
+  },
+  {
+    value: "limitation",
+    label: "Limitation",
+    entry_type: "constraint",
+    skill_level: "L4",
+    hint: "A constraint, caveat, warning, or known failure mode.",
+  },
+];
+
+function skillGraphNodeKindFor(entryType, skillLevel) {
+  if (entryType === "procedure") return SKILL_GRAPH_NODE_KINDS.find((kind) => kind.value === "workflow");
+  if (entryType === "constraint") return SKILL_GRAPH_NODE_KINDS.find((kind) => kind.value === "limitation");
+  if (entryType === "heuristic") return SKILL_GRAPH_NODE_KINDS.find((kind) => kind.value === "heuristic");
+  return SKILL_GRAPH_NODE_KINDS.find((kind) => (
+    kind.entry_type === entryType || kind.skill_level === skillLevel
+  )) || SKILL_GRAPH_NODE_KINDS[0];
+}
+
+function populateSkillGraphNodeKindSelect(select, value = "basic") {
+  select.innerHTML = "";
+  SKILL_GRAPH_NODE_KINDS.forEach((kind) => {
+    const option = document.createElement("option");
+    option.value = kind.value;
+    option.textContent = kind.label;
+    select.appendChild(option);
+  });
+  select.value = value;
+}
+
+function updateSkillGraphNodeKindHint(host, value) {
+  const hint = host.querySelector("[data-node-kind-hint]");
+  const kind = SKILL_GRAPH_NODE_KINDS.find((item) => item.value === value) || SKILL_GRAPH_NODE_KINDS[0];
+  if (hint) hint.textContent = kind.hint;
+  const relationLabel = host.querySelector("[data-relation-label]");
+  const relationHint = host.querySelector("[data-relation-hint]");
+  if (relationLabel) {
+    relationLabel.textContent = kind.value === "heuristic" || kind.value === "limitation"
+      ? "Attached to"
+      : "Dependencies";
+  }
+  if (relationHint) {
+    relationHint.textContent = kind.value === "heuristic"
+      ? "These parent nodes will show this heuristic during progressive retrieval."
+      : kind.value === "limitation"
+        ? "These parent nodes will show this limitation during progressive retrieval."
+        : "These nodes are required or related prerequisites.";
+  }
+}
+
+function selectedSkillGraphNodeKind(host, selectorPrefix = "data-edit-field") {
+  const value = host.querySelector(`[${selectorPrefix}='node_kind']`)?.value || "basic";
+  return SKILL_GRAPH_NODE_KINDS.find((kind) => kind.value === value) || SKILL_GRAPH_NODE_KINDS[0];
+}
+
+function skillGraphDisplayNodeType(entryType, skillLevel) {
+  return skillGraphNodeKindFor(entryType, skillLevel).label.toLowerCase();
 }
 
 function createSkillGraphEditToggle(node) {
@@ -4277,10 +4368,12 @@ function createSkillGraphEditToggle(node) {
 }
 
 function skillGraphEditorSnapshot(host) {
+  const kind = selectedSkillGraphNodeKind(host);
   return {
     description: host.querySelector("[data-edit-field='description']")?.value || "",
-    entry_type: host.querySelector("[data-edit-field='entry_type']")?.value || "capability",
-    skill_level: host.querySelector("[data-edit-field='skill_level']")?.value || "L1",
+    entry_type: kind.entry_type,
+    skill_level: kind.skill_level,
+    node_kind: kind.value,
     tags: csvToList(host.querySelector("[data-edit-field='tags']")?.value),
     dependent_skills: Array.from(host._skillGraphDependencySelected || []),
     content: host.querySelector("[data-edit-field='content']")?.value || "",
@@ -4298,8 +4391,8 @@ function applySkillGraphEditorSnapshot(host, snapshot) {
     if (el) el.value = value;
   };
   setValue("description", snapshot.description || "");
-  setValue("entry_type", snapshot.entry_type || "capability");
-  setValue("skill_level", snapshot.skill_level || "L1");
+  setValue("node_kind", snapshot.node_kind || skillGraphNodeKindFor(snapshot.entry_type, snapshot.skill_level).value);
+  updateSkillGraphNodeKindHint(host, host.querySelector("[data-edit-field='node_kind']")?.value || "basic");
   setValue("tags", listToCsv(snapshot.tags));
   setValue("content", snapshot.content || "");
   const selectedDeps = new Set(snapshot.dependent_skills || []);
@@ -4451,19 +4544,16 @@ function renderSkillGraphCreatePanel() {
     <label class="skill-graph-editor-field">Description
       <input data-create-field="description" type="text" />
     </label>
-    <div class="skill-graph-editor-grid">
-      <label class="skill-graph-editor-field">Type
-        <select data-create-field="entry_type"></select>
-      </label>
-      <label class="skill-graph-editor-field">Skill level
-        <select data-create-field="skill_level"></select>
-      </label>
-    </div>
+    <label class="skill-graph-editor-field">Node type
+      <select data-create-field="node_kind"></select>
+      <span class="skill-graph-field-hint" data-node-kind-hint></span>
+    </label>
     <label class="skill-graph-editor-field">Tags
       <input data-create-field="tags" type="text" placeholder="comma separated" />
     </label>
-    <div class="skill-graph-editor-field">Dependencies
+    <div class="skill-graph-editor-field"><span data-relation-label>Dependencies</span>
       <input data-dependency-filter type="text" placeholder="filter skills" />
+      <span class="skill-graph-field-hint" data-relation-hint></span>
       <div class="skill-graph-dependency-list"></div>
     </div>
     <label class="skill-graph-editor-field">SKILL.md body
@@ -4479,22 +4569,10 @@ function renderSkillGraphCreatePanel() {
     </div>
     <div class="skill-graph-editor-status"></div>
   `;
-  const typeSelect = host.querySelector("[data-create-field='entry_type']");
-  skillGraphEntryTypes().forEach((type) => {
-    const option = document.createElement("option");
-    option.value = type;
-    option.textContent = type;
-    typeSelect.appendChild(option);
-  });
-  const levelSelect = host.querySelector("[data-create-field='skill_level']");
-  skillGraphSkillLevels().forEach((level) => {
-    const option = document.createElement("option");
-    option.value = level;
-    option.textContent = level;
-    levelSelect.appendChild(option);
-  });
-  typeSelect.value = "capability";
-  levelSelect.value = "L1";
+  const nodeKindSelect = host.querySelector("[data-create-field='node_kind']");
+  populateSkillGraphNodeKindSelect(nodeKindSelect, "basic");
+  updateSkillGraphNodeKindHint(host, "basic");
+  nodeKindSelect.addEventListener("change", () => updateSkillGraphNodeKindHint(host, nodeKindSelect.value));
   host.querySelector("[data-create-field='content']").value = "# New skill\n\nDescribe how and when to use this skill.";
   renderSkillGraphDependencyPicker(host, skillGraphAvailableSkillNames(), []);
   host.querySelector("[data-create-action='cancel']").addEventListener("click", () => renderSkillGraphDetail(null));
@@ -4520,11 +4598,12 @@ async function createSkillGraphNode(host) {
     status.textContent = "Name is required.";
     return;
   }
+  const kind = selectedSkillGraphNodeKind(host, "data-create-field");
   const payload = {
     name,
     description: host.querySelector("[data-create-field='description']")?.value || "",
-    entry_type: host.querySelector("[data-create-field='entry_type']")?.value || "capability",
-    skill_level: host.querySelector("[data-create-field='skill_level']")?.value || "L1",
+    entry_type: kind.entry_type,
+    skill_level: kind.skill_level,
     tags: csvToList(host.querySelector("[data-create-field='tags']")?.value),
     dependent_skills: Array.from(host._skillGraphDependencySelected || []),
     content: host.querySelector("[data-create-field='content']")?.value || "",
@@ -4623,19 +4702,16 @@ function renderSkillGraphEditor(host, node, data) {
     <label class="skill-graph-editor-field">Description
       <input data-edit-field="description" type="text" />
     </label>
-    <div class="skill-graph-editor-grid">
-      <label class="skill-graph-editor-field">Type
-        <select data-edit-field="entry_type"></select>
-      </label>
-      <label class="skill-graph-editor-field">Skill level
-        <select data-edit-field="skill_level"></select>
-      </label>
-    </div>
+    <label class="skill-graph-editor-field">Node type
+      <select data-edit-field="node_kind"></select>
+      <span class="skill-graph-field-hint" data-node-kind-hint></span>
+    </label>
     <label class="skill-graph-editor-field">Tags
       <input data-edit-field="tags" type="text" placeholder="comma separated" />
     </label>
-    <div class="skill-graph-editor-field">Dependencies
+    <div class="skill-graph-editor-field"><span data-relation-label>Dependencies</span>
       <input data-dependency-filter type="text" placeholder="filter skills" />
+      <span class="skill-graph-field-hint" data-relation-hint></span>
       <div class="skill-graph-dependency-list"></div>
     </div>
     <label class="skill-graph-editor-field">SKILL.md body
@@ -4652,23 +4728,15 @@ function renderSkillGraphEditor(host, node, data) {
     <div class="skill-graph-editor-status"></div>
   `;
 
-  const typeSelect = host.querySelector("[data-edit-field='entry_type']");
-  (data.entry_types || []).forEach((type) => {
-    const option = document.createElement("option");
-    option.value = type;
-    option.textContent = type;
-    typeSelect.appendChild(option);
-  });
-  const levelSelect = host.querySelector("[data-edit-field='skill_level']");
-  (data.skill_levels || []).forEach((level) => {
-    const option = document.createElement("option");
-    option.value = level;
-    option.textContent = level;
-    levelSelect.appendChild(option);
+  const nodeKindSelect = host.querySelector("[data-edit-field='node_kind']");
+  const currentKind = skillGraphNodeKindFor(data.entry_type, data.skill_level);
+  populateSkillGraphNodeKindSelect(nodeKindSelect, currentKind.value);
+  updateSkillGraphNodeKindHint(host, currentKind.value);
+  nodeKindSelect.addEventListener("change", () => {
+    updateSkillGraphNodeKindHint(host, nodeKindSelect.value);
+    pushSkillGraphEditorHistory(host);
   });
   host.querySelector("[data-edit-field='description']").value = data.description || "";
-  typeSelect.value = data.entry_type || "capability";
-  levelSelect.value = data.skill_level || "L1";
   host.querySelector("[data-edit-field='tags']").value = listToCsv(data.tags || metadata.tags);
   host.querySelector("[data-edit-field='content']").value = data.content || "";
   renderSkillGraphDependencyPicker(host, data.available_skills || [], data.dependent_skills || metadata.dependent_skills || []);
@@ -4799,11 +4867,12 @@ function renderSkillGraphDetail(node) {
   skillGraphTab.detail.innerHTML = "";
   const title = document.createElement("h3");
   title.textContent = node.title || node.label || "Untitled";
+  const metadata = node.metadata || {};
 
   const meta = document.createElement("div");
   meta.className = "skill-graph-detail-meta";
   const metaItems = [
-    node.entry_type,
+    skillGraphDisplayNodeType(node.entry_type, metadata?.skill_level),
     node.enabled === false ? "disabled" : "enabled",
     node.verification_status,
     node.refinement_status,
@@ -4820,19 +4889,18 @@ function renderSkillGraphDetail(node) {
 
   const content = createSkillGraphMarkdown(node.content || "No content.", "skill-graph-detail-content skill-graph-markdown");
 
-  const metadata = node.metadata || {};
   const identity = createSkillGraphFacts([
     ["ID", node.id],
     ["Slug", node.slug],
     ["Skill", node.skill_name],
     ["Enabled", node.enabled !== false],
-    ["Type", node.entry_type],
+    ["Type", skillGraphDisplayNodeType(node.entry_type, metadata.skill_level)],
     ["Aliases", node.aliases],
   ]);
   const quality = createSkillGraphFacts([
     ["Verification", metadata.verification_status || node.verification_status],
     ["Refinement", metadata.refinement_status || node.refinement_status],
-    ["Skill level", metadata.skill_level],
+    ["Kind", skillGraphDisplayNodeType(node.entry_type, metadata.skill_level)],
     ["Trust", metadata.trust_score ?? node.trust_score],
     ["Usage", metadata.usage_count ?? node.usage_count],
     ["Review count", metadata.review_count],
@@ -4871,6 +4939,7 @@ function renderSkillGraphDetail(node) {
       createSkillGraphList(node.internal_refs),
       createSkillGraphList(metadata.external_refs),
     ]),
+    createSkillGraphSection("Progressive Retrieval", [skillGraphAttachedContextFacts(node.id)]),
     createSkillGraphSection("Execution Context", [requirements]),
     createSkillGraphSection("Feedback", [createSkillGraphObjectList(metadata.feedback_log, "verdict")]),
     ...attachmentSections,
@@ -4963,11 +5032,12 @@ function ensureSkillGraphTab() {
 
 function skillGraphNodeView(node, positions = {}) {
   const position = positions[node.id];
+  const nodeKind = skillGraphNodeKindFor(node.entry_type, node.metadata?.skill_level);
   return {
     id: node.id,
     label: node.label,
-    title: `${node.title}\n${node.entry_type}${node.enabled === false ? "\ndisabled" : ""}`,
-    color: skillGraphNodeColor(node.entry_type, node.enabled),
+    title: `${node.title}\n${nodeKind.label.toLowerCase()}${node.enabled === false ? "\ndisabled" : ""}`,
+    color: skillGraphNodeColor(node.entry_type, node.enabled, node.metadata?.skill_level),
     font: {
       color: node.enabled === false
         ? (state.theme === "light" ? "rgba(19, 32, 51, 0.42)" : "rgba(231, 237, 247, 0.42)")
@@ -4976,7 +5046,7 @@ function skillGraphNodeView(node, positions = {}) {
       face: "Manrope",
     },
     shape: "dot",
-    size: node.entry_type === "capability" || node.entry_type === "workflow" ? 18 : 13,
+    size: nodeKind.value === "basic" || nodeKind.value === "workflow" ? 18 : 14,
     borderWidth: node.enabled === false ? 1 : 2,
     ...(position ? { x: position.x, y: position.y } : {}),
   };
