@@ -683,13 +683,17 @@ def knowledge_stats(workspace):
     from matcreator.knowledge.query import _get_kg
     graph = _get_kg()
     stats = graph.stats()
-    memories = list(iter_memory(graph))
+    memory_count = 0
+    unpromoted_count = 0
+    for memory in iter_memory(graph):
+        memory_count += 1
+        unpromoted_count += int(not memory.promoted)
     click.echo("Know-Do graph (all native nodes):")
     click.echo(f"  Nodes: {stats['nodes']}  Edges: {stats['edges']}")
     click.echo("MemGraph nodes:")
     click.echo(
-        f"  Entries: {len(memories)}  "
-        f"Unpromoted: {sum(not entry.promoted for entry in memories)}"
+        f"  Entries: {memory_count}  "
+        f"Unpromoted: {unpromoted_count}"
     )
 
 

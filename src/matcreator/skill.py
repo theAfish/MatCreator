@@ -282,12 +282,33 @@ def seed_skills_to_graph() -> dict:
                         internal_refs.append("README.md")
                 except OSError as exc:
                     logger.warning("Failed to read %s: %s", readme_path, exc)
+        frontmatter_metadata = skill.frontmatter.metadata or {}
+        entry_type_value = frontmatter_metadata.get("entry_type") or frontmatter_metadata.get("type")
+        entry_type = EntryType.capability
+        if entry_type_value:
+            try:
+                entry_type = EntryType(str(entry_type_value))
+            except ValueError:
+                logger.warning("Ignoring invalid entry_type for skill '%s': %s", skill.name, entry_type_value)
+        skill_level_value = frontmatter_metadata.get("skill_level")
+        skill_level = SkillLevel.L1
+        if skill_level_value:
+            try:
+                skill_level = SkillLevel(str(skill_level_value))
+            except ValueError:
+                logger.warning("Ignoring invalid skill_level for skill '%s': %s", skill.name, skill_level_value)
+        extra_tags = [
+            str(tag).strip()
+            for tag in frontmatter_metadata.get("tags", [])
+            if str(tag).strip()
+        ]
+        tags = list(dict.fromkeys(["matcreator-skill", "managed", *extra_tags]))
         node, created = upsert_entry(
             kg,
             title=skill.name,
             content=content,
-            entry_type=EntryType.capability,
-            tags=["matcreator-skill", "managed"],
+            entry_type=entry_type,
+            tags=tags,
             internal_refs=internal_refs,
             scripts=scripts,
             assets=assets,
@@ -295,7 +316,7 @@ def seed_skills_to_graph() -> dict:
                 source_provenance="SKILL.md",
                 refinement_status=RefinementStatus.validated,
                 verification_status=VerificationStatus.peer_reviewed,
-                skill_level=SkillLevel.L1,
+                skill_level=skill_level,
                 custom={"managed_by": "matcreator", "kind": "skill"},
             ),
         )
@@ -320,10 +341,19 @@ def seed_skills_to_graph() -> dict:
         )
         seeded += int(created)
 
-    # Create dependency edges from dependent_skills metadata
+    # Create edges from dependent_skills metadata. For L3/L4 nodes this field
+    # means "attached parent skills" so progressive retrieval can scope them.
     edges_created = 0
     for skill in ALL_SKILLS:
-        deps = (skill.frontmatter.metadata or {}).get("dependent_skills", [])
+        metadata = skill.frontmatter.metadata or {}
+        deps = metadata.get("dependent_skills", [])
+        entry_type_value = metadata.get("entry_type") or metadata.get("type")
+        skill_level_value = metadata.get("skill_level")
+        relation = EdgeRelation.dependency
+        if entry_type_value == "heuristic" or skill_level_value == "L3":
+            relation = EdgeRelation.heuristic_for
+        elif entry_type_value == "constraint" or skill_level_value == "L4":
+            relation = EdgeRelation.constraint_on
         src_id = skill_node_ids.get(skill.name)
         for dep_name in deps:
             tgt_id = skill_node_ids.get(dep_name)
@@ -333,7 +363,7 @@ def seed_skills_to_graph() -> dict:
                         kg,
                         src_id,
                         tgt_id,
-                        relation=EdgeRelation.dependency,
+                        relation=relation,
                     )
                 )
             else:
