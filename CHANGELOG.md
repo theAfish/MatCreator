@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v2.8.0 (2026-07-08)
+
+### Bug Fixes
+
+- **ui**: Widen session-summary-header max-width to reduce title truncation
+  ([`6f67cec`](https://github.com/AI4MS/MatCreator/commit/6f67cec8495455715825deeca7df9f7040dfebbb))
+
+### Features
+
+- Change title place and session naming
+  ([`ea8bd8a`](https://github.com/AI4MS/MatCreator/commit/ea8bd8a938933f0ee473d4b8781e7d81262d7e93))
+
+- **dpa4**: Update skill and prepare script for DPA4-OMat24 v20260704
+  ([`ec91869`](https://github.com/AI4MS/MatCreator/commit/ec91869a7cb0e0dbc4208f1b6a0edd1bd42ae631))
+
+- **session-summary**: Add experimental session summary feature
+  ([`f462858`](https://github.com/AI4MS/MatCreator/commit/f46285899241db721ebc33be7bab2747ea23820a))
+
+- **session-summary**: Relocate banner to top of chat card with slide-down typewriter animation
+  ([`4d69234`](https://github.com/AI4MS/MatCreator/commit/4d69234a48617da08d5604d3d0951f27d5f055a3))
+
+
 ## v2.7.1 (2026-07-07)
 
 ### Bug Fixes
