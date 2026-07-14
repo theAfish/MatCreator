@@ -3,7 +3,6 @@ import { Network, DataSet } from "vis-network/standalone";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import * as $3Dmol from "3dmol";
 import "./style.css";
 
 // ---------------------------------------------------------------------------
@@ -100,6 +99,21 @@ let workspaceTerminalFit = null;
 let workspaceTerminalSocket = null;
 const structureTabs = new Map();
 let skillGraphTab = null;
+let matterVizModulePromise = null;
+let svelteRuntimePromise = null;
+
+function loadMatterVizModules() {
+  matterVizModulePromise ||= import("./MatterVizStructure.svelte");
+  svelteRuntimePromise ||= import("svelte");
+  return Promise.all([matterVizModulePromise, svelteRuntimePromise]);
+}
+
+// MatterViz includes a sizeable 3D stack. Download and compile it after the
+// initial UI becomes idle so opening the first structure does not block on it.
+const scheduleMatterVizPreload = window.requestIdleCallback
+  ? (callback) => window.requestIdleCallback(callback, { timeout: 2000 })
+  : (callback) => window.setTimeout(callback, 1000);
+scheduleMatterVizPreload(() => void loadMatterVizModules());
 
 function sessionTabTooltip(title) {
   return `${title || "Chat"}\nDouble-click to edit session name`;
@@ -1960,15 +1974,6 @@ function applyStoredPanelHeights() {
 
 function refreshGraphAndStructureLayout() {
   agentGraph.notifyLayoutChanged();
-  for (const tab of structureTabs.values()) {
-    if (!tab.viewer) continue;
-    try {
-      tab.viewer.resize();
-      tab.viewer.render();
-    } catch (_) {
-      // ignore transient resize/render issues
-    }
-  }
 }
 
 function syncPanelResizerVisibility() {
@@ -4338,16 +4343,6 @@ function activateCenterTab(tabId) {
 
   const structureTab = structureTabs.get(tabId);
   state.structure3dViewer = structureTab?.viewer || null;
-  if (structureTab?.viewer) {
-    requestAnimationFrame(() => {
-      try {
-        structureTab.viewer.resize();
-        structureTab.viewer.render();
-      } catch (_) {
-        // ignore transient 3Dmol resize issues
-      }
-    });
-  }
   if (tabId === "skill-graph" && skillGraphTab?.network) {
     requestAnimationFrame(() => {
       try {
@@ -4372,6 +4367,7 @@ function closeCenterTab(tabId) {
   const tab = structureTabs.get(tabId);
   if (!tab) return;
 
+  if (tab.destroyViewer) void tab.destroyViewer();
   tab.button.remove();
   tab.panel.remove();
   structureTabs.delete(tabId);
@@ -4437,7 +4433,7 @@ function ensureStructureTab(item) {
   centerTabsScroll?.appendChild(button);
   centerTabPanels?.appendChild(panel);
 
-  const tab = { id: tabId, item, button, panel, canvas, meta, viewer: null };
+  const tab = { id: tabId, item, button, panel, canvas, meta, viewer: null, destroyViewer: null };
   structureTabs.set(tabId, tab);
   activateCenterTab(tabId);
   return tab;
@@ -5623,46 +5619,47 @@ centerTabs?.addEventListener("click", (event) => {
 async function openViewer(item) {
   graphDetail.classList.add("hidden");
   const tab = ensureStructureTab(item);
+  if (tab.viewer) return;
+  if (tab.destroyViewer) await tab.destroyViewer();
+  tab.viewer = null;
+  tab.destroyViewer = null;
   tab.canvas.innerHTML = '<div style="color:var(--muted);padding:16px;font-size:13px">Loading…</div>';
   tab.meta.textContent = "";
 
   try {
-    const resp = await fetch(`/api/structure/view?path=${encodeURIComponent(item.path)}&session_id=${encodeURIComponent(state.sessionId || "")}`);
+    const [resp, [matterviz, svelte]] = await Promise.all([
+      fetch(`/api/structure/view?path=${encodeURIComponent(item.path)}&session_id=${encodeURIComponent(state.sessionId || "")}`),
+      loadMatterVizModules(),
+    ]);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
 
     tab.canvas.innerHTML = "";
-
-    const viewer = $3Dmol.createViewer(tab.canvas, { backgroundColor: state.theme === "light" ? "0xf8fbff" : "0x06080f" });
-    tab.viewer = viewer;
-    if (state.activeCenterTabId === tab.id) state.structure3dViewer = viewer;
-    viewer.addModel(data.xyz, "xyz");
-    viewer.setStyle({}, { sphere: { scale: 0.3 }, stick: { radius: 0.15 } });
-
-    if (data.periodic && data.cell) {
-      const [a, b, c] = data.cell;
-      const add = (u, v) => [u[0] + v[0], u[1] + v[1], u[2] + v[2]];
-      const corners = [
-        [0, 0, 0], a, b, c,
-        add(a, b), add(a, c), add(b, c), add(add(a, b), c),
-      ];
-      const edges = [[0,1],[0,2],[0,3],[1,4],[1,5],[2,4],[2,6],[3,5],[3,6],[4,7],[5,7],[6,7]];
-      for (const [i, j] of edges) {
-        viewer.addLine({
-          start: { x: corners[i][0], y: corners[i][1], z: corners[i][2] },
-          end:   { x: corners[j][0], y: corners[j][1], z: corners[j][2] },
-          color: "0x7dd3fc",
-          linewidth: 2,
-        });
-      }
-    }
-
-    viewer.zoomTo();
-    viewer.render();
-    refreshGraphAndStructureLayout();
-
-    tab.meta.textContent =
+    const structureMeta =
       `${data.formula}  ·  ${data.n_atoms} atoms${data.periodic ? "  ·  periodic" : ""}`;
+    const viewer = svelte.mount(matterviz.default, {
+      target: tab.canvas,
+      props: {
+        structure_string: data.structure_string || data.xyz,
+        source_path: item.path,
+        session_id: state.sessionId || "",
+        background_color: state.theme === "light" ? "#f8fbff" : "#06080f",
+        performance_mode: data.n_atoms > 500 ? "speed" : "quality",
+        on_modified: () => {
+          tab.meta.textContent = `${structureMeta}  ·  modified locally — export to save`;
+        },
+        on_generated: (generated) => {
+          const generatedMeta = `${generated.formula}  ·  ${generated.n_atoms} atoms`;
+          tab.meta.textContent = `${generatedMeta}  ·  ${generated.operation}  ·  saved`;
+          void refreshSessionFiles();
+        },
+      },
+    });
+    tab.viewer = viewer;
+    tab.destroyViewer = () => svelte.unmount(viewer);
+    if (state.activeCenterTabId === tab.id) state.structure3dViewer = viewer;
+
+    tab.meta.textContent = `${structureMeta}  ·  Select an atom to edit it`;
   } catch (err) {
     tab.canvas.innerHTML =
       `<div style="color:#f87171;padding:16px;font-size:13px">Failed to load structure: ${err}</div>`;

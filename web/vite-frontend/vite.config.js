@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 // Configurable port variables
 const webPort = process.env.MATCREATOR_WEB_PORT || "8001";
@@ -18,6 +19,15 @@ function stripOrigin(proxy) {
 }
 
 export default defineConfig({
+  plugins: [svelte()],
+  // MatterViz is locally patched. Keep it out of Vite's pre-bundled dependency
+  // cache so development servers always execute the patched viewport source.
+  optimizeDeps: {
+    exclude: ["matterviz"],
+    // MatterViz loads three-perf through Threlte. Pre-bundling it converts its
+    // UMD-only Tweakpane v3 dependency into an ESM-compatible module.
+    include: ["three-perf"],
+  },
   server: {
     port: frontendPort,
     strictPort: true,

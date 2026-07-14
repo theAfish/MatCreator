@@ -1,0 +1,500 @@
+diff --git a/node_modules/matterviz/dist/structure/Structure.svelte b/node_modules/matterviz/dist/structure/Structure.svelte
+index 4704e6d..9f00856 100644
+--- a/node_modules/matterviz/dist/structure/Structure.svelte
++++ b/node_modules/matterviz/dist/structure/Structure.svelte
+@@ -1388,11 +1388,36 @@
+ 
+   // Handle atom moves from TransformControls. Applies Cartesian delta and wraps
+   // fractional coords inline so normalize_fractional_coords hits its fast path.
+-  function handle_sites_moved(scene_indices: number[], delta: Vec3) {
++  function handle_sites_moved(
++    scene_indices: number[],
++    delta: Vec3,
++    rotation?: [number, number, number, number],
++  ) {
+     if (!structure?.sites) return
+     is_internal_edit = true
+ 
+     const orig_indices = scene_to_structure_indices(scene_indices)
++    const selected_sites = structure.sites.filter((_, idx) => orig_indices.has(idx))
++    const rotation_center: Vec3 = selected_sites.reduce<Vec3>(
++      (sum, site) => [sum[0] + site.xyz[0], sum[1] + site.xyz[1], sum[2] + site.xyz[2]],
++      [0, 0, 0],
++    ).map((value) => value / selected_sites.length) as Vec3
++    const [qx, qy, qz, qw] = rotation ?? [0, 0, 0, 1]
++    const rotate_about_center = (xyz: Vec3): Vec3 => {
++      if (!rotation) return xyz
++      const px = xyz[0] - rotation_center[0]
++      const py = xyz[1] - rotation_center[1]
++      const pz = xyz[2] - rotation_center[2]
++      const ix = qw * px + qy * pz - qz * py
++      const iy = qw * py + qz * px - qx * pz
++      const iz = qw * pz + qx * py - qy * px
++      const iw = -qx * px - qy * py - qz * pz
++      return [
++        rotation_center[0] + ix * qw + iw * -qx + iy * -qz - iz * -qy,
++        rotation_center[1] + iy * qw + iw * -qy + iz * -qx - ix * -qz,
++        rotation_center[2] + iz * qw + iw * -qz + ix * -qy - iy * -qx,
++      ]
++    }
+     // For crystals, wrap to [0,1) inline so normalize_fractional_coords fast-paths.
+     // For molecules (no lattice), just apply the Cartesian delta directly.
+     const lattice = `lattice` in structure ? (structure as Crystal).lattice.matrix : null
+@@ -1403,10 +1428,11 @@
+       ...structure,
+       sites: structure.sites.map((site, idx) => {
+         if (!orig_indices.has(idx)) return site
++        const rotated_xyz = rotate_about_center(site.xyz)
+         const new_xyz: Vec3 = [
+-          site.xyz[0] + delta[0],
+-          site.xyz[1] + delta[1],
+-          site.xyz[2] + delta[2],
++          rotated_xyz[0] + delta[0],
++          rotated_xyz[1] + delta[1],
++          rotated_xyz[2] + delta[2],
+         ]
+         if (!cart_to_frac || !frac_to_cart) {
+           return { ...site, xyz: new_xyz, abc: new_xyz }
+diff --git a/node_modules/matterviz/dist/structure/StructureScene.svelte b/node_modules/matterviz/dist/structure/StructureScene.svelte
+index 6828dd6..68b3e19 100644
+--- a/node_modules/matterviz/dist/structure/StructureScene.svelte
++++ b/node_modules/matterviz/dist/structure/StructureScene.svelte
+@@ -52,7 +52,7 @@
+   import * as extras from '@threlte/extras'
+   import { type ComponentProps, type Snippet, untrack } from 'svelte'
+   import { SvelteMap, SvelteSet } from 'svelte/reactivity'
+-  import { BufferAttribute, BufferGeometry, Color, DoubleSide, Vector3 } from 'three'
++  import { BufferAttribute, BufferGeometry, Color, DoubleSide, Quaternion, Vector3 } from 'three'
+   import type { Mesh, Object3D } from 'three'
+   import Bond from './Bond.svelte'
+   import type { BondEditResult, BondingStrategy, BondKeyTarget } from './bonding'
+@@ -80,6 +80,8 @@
+     radius: number
+   }
+ 
++  type TransformMode = 'translate' | 'rotate'
++
+   type BondContextMenu = {
+     site_idx_1: number
+     site_idx_2: number
+@@ -205,6 +207,7 @@
+     on_operation_start,
+     on_bond_edit_start,
+     on_add_atom,
++    transform_mode = `translate` as TransformMode,
+     add_atom_mode = $bindable(false),
+     add_element = $bindable(`C`),
+     cursor = $bindable(`default`),
+@@ -212,6 +215,7 @@
+     volumetric_data = undefined,
+     isosurface_settings = DEFAULT_ISOSURFACE_SETTINGS,
+     interactive = true,
++    preserve_pbc_image_appearance = false,
+   }: SceneControlProps & {
+     structure?: AnyStructure
+     base_structure?: AnyStructure // The original structure without image atoms, used for property color calculation
+@@ -308,10 +312,15 @@
+     atom_color_config?: Partial<AtomColorConfig> // Atom coloring configuration
+     sym_data?: MoyoDataset | null // Symmetry data for Wyckoff coloring
+     // Edit-atoms mode callbacks and state
+-    on_sites_moved?: (scene_indices: number[], delta: Vec3) => void
++    on_sites_moved?: (
++      scene_indices: number[],
++      delta: Vec3,
++      rotation?: [number, number, number, number],
++    ) => void
+     on_operation_start?: () => void
+     on_bond_edit_start?: () => void
+     on_add_atom?: (xyz: Vec3, element: ElementSymbol) => void
++    transform_mode?: TransformMode
+     add_atom_mode?: boolean // whether user is in click-to-place add-atom sub-mode
+     add_element?: ElementSymbol // element to add when clicking in add-atom mode
+     cursor?: string // cursor style for the 3D canvas
+@@ -321,6 +330,8 @@
+     // When false, render the scene without hover/edit raycast helpers. Used by multi-side
+     // view so inactive panes skip interaction-only work while the active pane stays editable.
+     interactive?: boolean
++    // Keep periodic images visually unchanged while atom transform controls are active.
++    preserve_pbc_image_appearance?: boolean
+   } = $props()
+ 
+   const pulse = create_pulse_animation(
+@@ -415,6 +426,7 @@
+   let transform_object = $state<Mesh | undefined>(undefined)
+   // Plain variable — only used imperatively in TransformControls drag handlers
+   let drag_start_centroid: Vec3 | null = null
++  let previous_transform_quaternion: Quaternion | null = null
+   // Frozen centroid set on drag start. While non-null, the TransformControls mesh
+   // position stays at this fixed value so Svelte's reactive centroid updates (from
+   // PBC wrapping) don't fight TransformControls. Cleared on mouseUp so the mesh
+@@ -1772,23 +1784,25 @@
+           />
+         {/if}
+         {#if instanced_atom_sets.image.length > 0}
+-          {@const edit_mode_image = measure_mode === `edit-atoms`}
++          {@const is_edit_image = measure_mode === `edit-atoms`}
++          {@const ghost_image = is_edit_image && !preserve_pbc_image_appearance}
+           <InstancedAtoms
+             atoms={instanced_atom_sets.image}
+             {sphere_segments}
+-            ghost={edit_mode_image}
+-            {...atom_instance_events(instanced_atom_sets.image, edit_mode_image)}
++            ghost={ghost_image}
++            {...atom_instance_events(instanced_atom_sets.image, is_edit_image)}
+           />
+         {/if}
+ 
+         <!-- Regular rendering for partial occupancy atoms -->
+         {#each partial_occupancy_atoms as atom (atom.site_idx + atom.element + atom.occupancy)}
+           {@const partial_edit_image = measure_mode === `edit-atoms` && atom.is_image_atom}
+-          {@const ghost_opacity = partial_edit_image ? 0.5 : 1}
++          {@const ghost_partial_image = partial_edit_image && !preserve_pbc_image_appearance}
++          {@const ghost_opacity = ghost_partial_image ? 0.5 : 1}
+           <!-- Visual only: pointer interaction handled by the invisible full-sphere
+             hit targets below (wedge meshes leave gaps at the poles). -->
+           <T.Group position={atom.position} scale={atom.radius}>
+-            {@const partial_color = partial_edit_image ? desaturate(atom.color) : atom.color}
++            {@const partial_color = ghost_partial_image ? desaturate(atom.color) : atom.color}
+             <T.Mesh>
+               <T.SphereGeometry
+                 args={[0.5, sphere_segments, sphere_segments, atom.start_phi, atom.phi_length]}
+@@ -1796,7 +1810,7 @@
+               <T.MeshStandardMaterial
+                 color={partial_color}
+                 opacity={ghost_opacity}
+-                transparent={partial_edit_image}
++                transparent={ghost_partial_image}
+               />
+             </T.Mesh>
+ 
+@@ -1814,7 +1828,7 @@
+                   color={partial_color}
+                   side={2}
+                   opacity={ghost_opacity}
+-                  transparent={partial_edit_image}
++                  transparent={ghost_partial_image}
+                 />
+               </T.Mesh>
+             {/if}
+@@ -1832,7 +1846,7 @@
+                   color={partial_color}
+                   side={2}
+                   opacity={ghost_opacity}
+-                  transparent={partial_edit_image}
++                  transparent={ghost_partial_image}
+                 />
+               </T.Mesh>
+             {/if}
+@@ -2174,30 +2188,55 @@
+             object={transform_object}
+             translationSnap={0.1}
+             size={1.2}
+-            space="world"
++            space="local"
++            mode={transform_mode}
+             onobjectChange={() => {
+-              if (!transform_object?.position || !drag_start_centroid) return
++              if (!transform_object?.position) return
+               const { x: tx, y: ty, z: tz } = transform_object.position
++              const start_centroid = drag_start_centroid ?? centroid
+               const delta: Vec3 = [
+-                tx - drag_start_centroid[0],
+-                ty - drag_start_centroid[1],
+-                tz - drag_start_centroid[2],
++                tx - start_centroid[0],
++                ty - start_centroid[1],
++                tz - start_centroid[2],
+               ]
+-              // Update reference point so deltas are incremental, not cumulative.
+-              // Without this, each frame compounds: sites already moved by previous
+-              // delta get the full cumulative delta re-applied.
++              const current_quaternion = transform_object.quaternion.clone()
++              const rotation_delta = current_quaternion
++                .clone()
++                .multiply((previous_transform_quaternion ?? new Quaternion()).clone().invert())
++              const has_rotation =
++                Math.abs(rotation_delta.x) > 1e-12 ||
++                Math.abs(rotation_delta.y) > 1e-12 ||
++                Math.abs(rotation_delta.z) > 1e-12
++              if (!delta.some((value) => Math.abs(value) > 1e-12) && !has_rotation) return
++              previous_transform_quaternion = current_quaternion
++              // `mouseDown` is not consistently forwarded by every Threlte
++              // canvas host. The `change` event is reliable, so initialise the
++              // move lazily here rather than dropping the first drag update.
++              if (!dragging_atoms) {
++                dragging_atoms = true
++                on_operation_start?.()
++              }
++              frozen_centroid = [tx, ty, tz]
+               drag_start_centroid = [tx, ty, tz]
+-              on_sites_moved?.(selected_sites, delta)
++              on_sites_moved?.(
++                selected_sites,
++                delta,
++                has_rotation
++                  ? [rotation_delta.x, rotation_delta.y, rotation_delta.z, rotation_delta.w]
++                  : undefined,
++              )
+             }}
+             onmouseDown={() => {
+               dragging_atoms = true
+               drag_start_centroid = frozen_centroid = [...centroid] as Vec3
++              previous_transform_quaternion = transform_object?.quaternion.clone() ?? new Quaternion()
+               on_operation_start?.()
+             }}
+             onmouseUp={() => {
+               dragging_atoms = false
+               frozen_centroid = null
+               drag_start_centroid = null
++              previous_transform_quaternion = null
+             }}
+           />
+         {/if}
+diff --git a/node_modules/matterviz/dist/structure/StructureScene.svelte.d.ts b/node_modules/matterviz/dist/structure/StructureScene.svelte.d.ts
+index 0c1ce11..f008fab 100644
+--- a/node_modules/matterviz/dist/structure/StructureScene.svelte.d.ts
++++ b/node_modules/matterviz/dist/structure/StructureScene.svelte.d.ts
+@@ -98,10 +98,11 @@ type $$ComponentProps = SceneControlProps & {
+     site_radius_overrides?: Map<number, number> | SvelteMap<number, number>;
+     atom_color_config?: Partial<AtomColorConfig>;
+     sym_data?: MoyoDataset | null;
+-    on_sites_moved?: (scene_indices: number[], delta: Vec3) => void;
++    on_sites_moved?: (scene_indices: number[], delta: Vec3, rotation?: [number, number, number, number]) => void;
+     on_operation_start?: () => void;
+     on_bond_edit_start?: () => void;
+     on_add_atom?: (xyz: Vec3, element: ElementSymbol) => void;
++    transform_mode?: 'translate' | 'rotate';
+     add_atom_mode?: boolean;
+     add_element?: ElementSymbol;
+     cursor?: string;
+@@ -109,6 +110,7 @@ type $$ComponentProps = SceneControlProps & {
+     volumetric_data?: VolumetricData;
+     isosurface_settings?: IsosurfaceSettings;
+     interactive?: boolean;
++    preserve_pbc_image_appearance?: boolean;
+ };
+ declare const StructureScene: import("svelte").Component<$$ComponentProps, {}, "cursor" | "camera" | "site_label_offset" | "vector_configs" | "orbit_controls" | "hovered_idx" | "hovered_site" | "polyhedra_rendered_elements" | "camera_is_moving" | "selected_sites" | "measured_sites" | "added_bonds" | "removed_bonds" | "bond_order_overrides" | "bond_edit_mode" | "active_sites" | "scene" | "rotation_target_ref" | "initial_computed_zoom" | "hidden_elements" | "hidden_prop_vals" | "element_radius_overrides" | "site_radius_overrides" | "add_atom_mode" | "add_element" | "dragging_atoms">;
+ type StructureScene = ReturnType<typeof StructureScene>;
+diff --git a/node_modules/matterviz/dist/structure/StructureViewport.svelte b/node_modules/matterviz/dist/structure/StructureViewport.svelte
+index 017ce20..de376cc 100644
+--- a/node_modules/matterviz/dist/structure/StructureViewport.svelte
++++ b/node_modules/matterviz/dist/structure/StructureViewport.svelte
+@@ -22,9 +22,16 @@
+   import type { MoyoDataset } from '@spglib/moyo-wasm'
+   import { Canvas } from '@threlte/core'
+   import type { ComponentProps } from 'svelte'
+-  import { untrack } from 'svelte'
++  import { onMount, untrack } from 'svelte'
+   import { SvelteMap, SvelteSet } from 'svelte/reactivity'
+-  import { WebGLRenderer, type Camera, type OrthographicCamera, type Scene } from 'three'
++  import {
++    Euler,
++    Vector3,
++    WebGLRenderer,
++    type Camera,
++    type OrthographicCamera,
++    type Scene,
++  } from 'three'
+   import type { AtomColorConfig } from './atom-properties'
+   import StructureScene from './StructureScene.svelte'
+ 
+@@ -165,6 +172,9 @@
+   let width = $state(0)
+   let height = $state(0)
+   let cursor = $state(`default`)
++  let viewport_element = $state<HTMLDivElement>()
++  let selection_box = $state<{ left: number; top: number; width: number; height: number } | null>(null)
++  let transform_mode = $state<'translate' | 'rotate'>(`translate`)
+ 
+   // Multi-view panes are ~half the viewer, so shrink the (fixed 86px) viewport gizmo to
+   // stay proportional. Single view keeps the default size.
+@@ -275,6 +285,106 @@
+       return
+     reset_camera()
+   }
++
++  // Shift + primary-button drag selects every editable atom inside the screen-space box.
++  // The scene applies its configured rotation around `rotation_target_ref`, so mirror that
++  // transform before projecting each atom through the active camera.
++  onMount(() => {
++    let drag_start: { x: number; y: number } | null = null
++
++    const is_form_control = (target: EventTarget | null): boolean =>
++      target instanceof Element && Boolean(target.closest(`button, input, select, textarea, [contenteditable='true']`))
++
++    const update_selection_box = (x: number, y: number) => {
++      if (!drag_start || !viewport_element) return
++      const rect = viewport_element.getBoundingClientRect()
++      selection_box = {
++        left: Math.min(drag_start.x, x) - rect.left,
++        top: Math.min(drag_start.y, y) - rect.top,
++        width: Math.abs(x - drag_start.x),
++        height: Math.abs(y - drag_start.y),
++      }
++    }
++
++    const select_boxed_atoms = (x: number, y: number) => {
++      if (!drag_start || !viewport_element || !camera || !structure?.sites) return
++      const rect = viewport_element.getBoundingClientRect()
++      const left = Math.min(drag_start.x, x) - rect.left
++      const right = Math.max(drag_start.x, x) - rect.left
++      const top = Math.min(drag_start.y, y) - rect.top
++      const bottom = Math.max(drag_start.y, y) - rect.top
++      if (right - left < 3 || bottom - top < 3) return
++
++      const center = rotation_target_ref ?? [0, 0, 0]
++      const rotation = new Euler(...(scene_props.rotation ?? [0, 0, 0]))
++      const selected = new Set(selected_sites)
++      structure.sites.forEach((site, index) => {
++        if (site.properties?.orig_site_idx != null) return
++        const projected = new Vector3(...site.xyz)
++          .sub(new Vector3(...center))
++          .applyEuler(rotation)
++          .add(new Vector3(...center))
++          .project(camera)
++        if (projected.z < -1 || projected.z > 1) return
++        const screen_x = (projected.x + 1) * 0.5 * rect.width
++        const screen_y = (1 - projected.y) * 0.5 * rect.height
++        if (screen_x >= left && screen_x <= right && screen_y >= top && screen_y <= bottom) {
++          selected.add(index)
++        }
++      })
++      selected_sites = [...selected]
++      measured_sites = [...selected_sites]
++    }
++
++    const stop_drag = (event: PointerEvent) => {
++      if (!drag_start) return
++      event.preventDefault()
++      event.stopPropagation()
++      select_boxed_atoms(event.clientX, event.clientY)
++      drag_start = null
++      selection_box = null
++    }
++
++    const move_drag = (event: PointerEvent) => {
++      if (!drag_start) return
++      event.preventDefault()
++      event.stopPropagation()
++      update_selection_box(event.clientX, event.clientY)
++    }
++
++    const start_drag = (event: PointerEvent) => {
++      if (
++        !interactive ||
++        measure_mode !== `edit-atoms` ||
++        event.button !== 0 ||
++        !event.shiftKey ||
++        is_form_control(event.target)
++      )
++        return
++      onactivate?.()
++      drag_start = { x: event.clientX, y: event.clientY }
++      update_selection_box(event.clientX, event.clientY)
++      event.preventDefault()
++      event.stopImmediatePropagation()
++    }
++
++    // Register from the document's capture phase. Threlte owns the canvas and
++    // can stop propagation for orbiting, whereas this listener runs before any
++    // canvas handler and therefore reliably reserves Shift-drag for selection.
++    const document_start_drag = (event: PointerEvent) => {
++      if (viewport_element?.contains(event.target as Node)) start_drag(event)
++    }
++    document.addEventListener(`pointerdown`, document_start_drag, true)
++    document.addEventListener(`pointermove`, move_drag, true)
++    document.addEventListener(`pointerup`, stop_drag, true)
++    document.addEventListener(`pointercancel`, stop_drag, true)
++    return () => {
++      document.removeEventListener(`pointerdown`, document_start_drag, true)
++      document.removeEventListener(`pointermove`, move_drag, true)
++      document.removeEventListener(`pointerup`, stop_drag, true)
++      document.removeEventListener(`pointercancel`, stop_drag, true)
++    }
++  })
+ </script>
+ 
+ <!-- svelte-ignore a11y_no_static_element_interactions -->
+@@ -283,11 +393,35 @@
+   class:active
+   class:multi={in_grid}
+   style:--canvas-cursor={cursor}
++  bind:this={viewport_element}
+   bind:clientWidth={width}
+   bind:clientHeight={height}
+   onpointerenter={onactivate}
+   ondblclick={handle_dblclick}
+ >
++  {#if selection_box}
++    <div
++      class="box-selection"
++      style:left={`${selection_box.left}px`}
++      style:top={`${selection_box.top}px`}
++      style:width={`${selection_box.width}px`}
++      style:height={`${selection_box.height}px`}
++    ></div>
++  {/if}
++  {#if measure_mode === `edit-atoms` && selected_sites.length > 0}
++    <div class="selection-transform-mode" role="group" aria-label="Selected atom transform mode">
++      <button
++        class:active={transform_mode === `translate`}
++        title="Move selected atoms"
++        onclick={() => (transform_mode = `translate`)}
++      >Move</button>
++      <button
++        class:active={transform_mode === `rotate`}
++        title="Rotate selected atoms around their shared center"
++        onclick={() => (transform_mode = `rotate`)}
++      >Rotate</button>
++    </div>
++  {/if}
+   {#if label}<span class="viewport-label">{label}</span>{/if}
+   <Canvas createRenderer={create_renderer}>
+     <StructureScene
+@@ -333,6 +467,7 @@
+       {on_operation_start}
+       {on_bond_edit_start}
+       {on_add_atom}
++      {transform_mode}
+       bind:add_atom_mode
+       bind:add_element
+       bind:cursor
+@@ -352,6 +487,38 @@
+     min-width: 0;
+     min-height: 0;
+   }
++  .box-selection {
++    position: absolute;
++    z-index: 3;
++    pointer-events: none;
++    box-sizing: border-box;
++    border: 1px solid var(--struct-box-selection-border, #6cf0ff);
++    background: var(--struct-box-selection-fill, color-mix(in srgb, #6cf0ff 18%, transparent));
++  }
++  .selection-transform-mode {
++    position: absolute;
++    z-index: 4;
++    top: 10px;
++    left: 50%;
++    display: flex;
++    overflow: hidden;
++    border: 1px solid var(--struct-viewport-border, rgba(128, 128, 128, 0.45));
++    border-radius: 6px;
++    background: color-mix(in srgb, #111 82%, transparent);
++    transform: translateX(-50%);
++  }
++  .selection-transform-mode button {
++    border: 0;
++    padding: 5px 8px;
++    color: #d1d5db;
++    background: transparent;
++    font: 600 11px/1 system-ui, sans-serif;
++    cursor: pointer;
++  }
++  .selection-transform-mode button.active {
++    color: #061217;
++    background: var(--struct-box-selection-border, #6cf0ff);
++  }
+   /* In multi-view, give each pane a subtle separator and highlight the active one */
+   .viewport-cell.multi {
+     border: 1px solid var(--struct-viewport-border, rgba(128, 128, 128, 0.35));
