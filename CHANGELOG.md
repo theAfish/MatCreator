@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v2.11.0 (2026-07-15)
+
+### Bug Fixes
+
+- Add the docs for architecture components
+  ([`8c10e2a`](https://github.com/AI4MS/MatCreator/commit/8c10e2a93d734c6b8275bbf1ade8ad06d2588c14))
+
+### Chores
+
+- Add docs
+  ([`8c10e2a`](https://github.com/AI4MS/MatCreator/commit/8c10e2a93d734c6b8275bbf1ade8ad06d2588c14))
+
+### Features
+
+- Add persistent middle layer
+  ([`8c10e2a`](https://github.com/AI4MS/MatCreator/commit/8c10e2a93d734c6b8275bbf1ade8ad06d2588c14))
+
+
 ## v2.10.1 (2026-07-15)
 
 ### Bug Fixes
