@@ -99,21 +99,19 @@ let workspaceTerminalFit = null;
 let workspaceTerminalSocket = null;
 const structureTabs = new Map();
 let skillGraphTab = null;
-let matterVizModulePromise = null;
+let structureViewerModulePromise = null;
 let svelteRuntimePromise = null;
 
-function loadMatterVizModules() {
-  matterVizModulePromise ||= import("./MatterVizStructure.svelte");
+function loadStructureViewerModules() {
+  structureViewerModulePromise ||= import("./structure/StructureViewer.svelte");
   svelteRuntimePromise ||= import("svelte");
-  return Promise.all([matterVizModulePromise, svelteRuntimePromise]);
+  return Promise.all([structureViewerModulePromise, svelteRuntimePromise]);
 }
 
-// MatterViz includes a sizeable 3D stack. Download and compile it after the
-// initial UI becomes idle so opening the first structure does not block on it.
-const scheduleMatterVizPreload = window.requestIdleCallback
+const scheduleStructureViewerPreload = window.requestIdleCallback
   ? (callback) => window.requestIdleCallback(callback, { timeout: 2000 })
   : (callback) => window.setTimeout(callback, 1000);
-scheduleMatterVizPreload(() => void loadMatterVizModules());
+scheduleStructureViewerPreload(() => void loadStructureViewerModules());
 
 function sessionTabTooltip(title) {
   return `${title || "Chat"}\nDouble-click to edit session name`;
@@ -137,6 +135,7 @@ function applyTheme(theme) {
   const nextTheme = theme === "light" ? "light" : "dark";
   state.theme = nextTheme;
   document.body.dataset.theme = nextTheme;
+  window.dispatchEvent(new CustomEvent("matcreator-theme-change", { detail: nextTheme }));
   themeToggle?.setAttribute("aria-pressed", String(nextTheme === "light"));
   themeToggle?.setAttribute("title", nextTheme === "light" ? "Toggle dark mode" : "Toggle light mode");
   themeToggle?.setAttribute("aria-label", nextTheme === "light" ? "Toggle dark mode" : "Toggle light mode");
@@ -5627,9 +5626,9 @@ async function openViewer(item) {
   tab.meta.textContent = "";
 
   try {
-    const [resp, [matterviz, svelte]] = await Promise.all([
+    const [resp, [structureViewer, svelte]] = await Promise.all([
       fetch(`/api/structure/view?path=${encodeURIComponent(item.path)}&session_id=${encodeURIComponent(state.sessionId || "")}`),
-      loadMatterVizModules(),
+      loadStructureViewerModules(),
     ]);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
@@ -5637,7 +5636,7 @@ async function openViewer(item) {
     tab.canvas.innerHTML = "";
     const structureMeta =
       `${data.formula}  ·  ${data.n_atoms} atoms${data.periodic ? "  ·  periodic" : ""}`;
-    const viewer = svelte.mount(matterviz.default, {
+    const viewer = svelte.mount(structureViewer.default, {
       target: tab.canvas,
       props: {
         structure_string: data.structure_string || data.xyz,
@@ -5646,7 +5645,7 @@ async function openViewer(item) {
         background_color: state.theme === "light" ? "#f8fbff" : "#06080f",
         performance_mode: data.n_atoms > 500 ? "speed" : "quality",
         on_modified: () => {
-          tab.meta.textContent = `${structureMeta}  ·  modified locally — export to save`;
+          tab.meta.textContent = `${structureMeta}  ·  unsaved atom edits`;
         },
         on_generated: (generated) => {
           const generatedMeta = `${generated.formula}  ·  ${generated.n_atoms} atoms`;

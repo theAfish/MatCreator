@@ -2,17 +2,28 @@
 from __future__ import annotations
 
 import re
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 from ase import Atoms
-from ase.build import bulk, molecule, stack
-from ase.io import write
+from ase.build import molecule
+from ase.io import read, write
 
 
 class ModelingError(ValueError):
     """Raised when a modeling request has invalid or unsupported parameters."""
+
+
+def load_working_structure(
+    structure_string: str,
+    fallback: Callable[[], Atoms],
+) -> Atoms:
+    """Load the current editor snapshot, falling back to the source artifact."""
+    if structure_string:
+        return read(StringIO(structure_string), format="extxyz")
+    return fallback()
 
 
 def _vec3(value: Any, name: str, cast: Callable = float) -> tuple:
@@ -230,15 +241,26 @@ def apply_modeling_operation(
 
     elif operation == "molecule":
         smiles = str(params.get("smiles", "")).strip()
-        fragment = (
-            molecule_from_smiles(
-                smiles,
-                random_seed=int(params.get("random_seed", 61453)),
-                optimize=bool(params.get("optimize", True)),
+        try:
+            from mckit.operate.molecule_creation import (
+                ASEMoleculeBuilder,
+                SMILESMoleculeBuilder,
             )
-            if smiles
-            else _molecule(str(params.get("name", "H2O")).strip())
-        )
+
+            built = (
+                SMILESMoleculeBuilder().apply(
+                    smiles=smiles,
+                    optimize=bool(params.get("optimize", True)),
+                    vacuum=0,
+                )
+                if smiles
+                else ASEMoleculeBuilder().apply(
+                    name=str(params.get("name", "H2O")).strip()
+                )
+            )
+            fragment = built.to_ase_atoms()
+        except (ImportError, TypeError, ValueError, RuntimeError) as exc:
+            raise ModelingError(f"Could not create molecule with MatCraft Kit: {exc}") from exc
         position = np.asarray(_vec3(params.get("position", [0, 0, 0]), "position"))
         fragment.translate(position - fragment.get_center_of_mass())
         if bool(params.get("append", True)) and len(atoms):
@@ -255,9 +277,31 @@ def apply_modeling_operation(
         a = params.get("a")
         cubic = bool(params.get("cubic", True))
         try:
-            result = bulk(symbol, crystalstructure=crystal_structure, a=float(a) if a else None, cubic=cubic)
-        except Exception as exc:
-            raise ModelingError(f"Could not create {symbol} {crystal_structure} crystal: {exc}") from exc
+            from mckit.operate.bulk import BulkBuilder
+
+            if a is None or str(a).strip() == "":
+                # MatCraft Kit requires an explicit lattice parameter whereas
+                # the existing UI historically allowed ASE reference-state
+                # inference. Preserve that input contract, then hand the actual
+                # construction to MatCraft Kit.
+                from ase.build import bulk as ase_bulk
+
+                a = ase_bulk(
+                    symbol,
+                    crystalstructure=crystal_structure,
+                    cubic=cubic,
+                ).cell.lengths()[0]
+
+            result = BulkBuilder().apply(
+                element=symbol,
+                structure_type=crystal_structure,
+                a=float(a),
+                conventional_unit_cell=cubic,
+            ).to_ase_atoms()
+        except (ImportError, TypeError, ValueError, RuntimeError) as exc:
+            raise ModelingError(
+                f"Could not create {symbol} {crystal_structure} crystal with MatCraft Kit: {exc}"
+            ) from exc
 
     elif operation == "perturb":
         magnitude = float(params.get("magnitude", 0.1))
@@ -287,18 +331,26 @@ def apply_modeling_operation(
         if maxstrain < 0 or distance < 0:
             raise ModelingError("maxstrain and distance must be non-negative")
         try:
-            result = stack(
-                atoms,
-                secondary.copy(),
-                axis=axis,
-                maxstrain=maxstrain,
-                distance=distance,
+            from mckit.operate.interface import InterfaceBuilder
+            from pymatgen.io.ase import AseAtomsAdaptor
+
+            result = AseAtomsAdaptor().get_atoms(
+                InterfaceBuilder().apply(
+                    film=atoms,
+                    substrate=secondary.copy(),
+                    miller_film=_vec3(params.get("film_miller", [1, 0, 0]), "film_miller", int),
+                    miller_substrate=_vec3(
+                        params.get("substrate_miller", [1, 0, 0]),
+                        "substrate_miller",
+                        int,
+                    ),
+                    max_length_tol=maxstrain,
+                    gap=distance,
+                    vacuum_between=float(params.get("vacuum", 10.0)),
+                )
             )
         except Exception as exc:
-            raise ModelingError(f"Could not create commensurate interface: {exc}") from exc
-        vacuum = float(params.get("vacuum", 10.0))
-        if vacuum > 0:
-            result.center(vacuum=vacuum, axis=axis)
+            raise ModelingError(f"Could not create interface with MatCraft Kit: {exc}") from exc
 
     elif operation == "vacuum":
         axis = int(params.get("axis", 2))

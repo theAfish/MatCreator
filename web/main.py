@@ -2299,11 +2299,16 @@ async def view_structure(
 
 @app.post("/api/structure/model")
 async def model_structure(request: Request) -> JSONResponse:
-    """Apply an ASE modeling operation and save the result in the session workdir."""
+    """Apply a MatCraft Kit-backed modeling operation and save the result."""
     from io import StringIO
 
     from ase.io import write as ase_write
-    from structure_modeling import ModelingError, apply_modeling_operation, save_generated_structure
+    from structure_modeling import (
+        ModelingError,
+        apply_modeling_operation,
+        load_working_structure,
+        save_generated_structure,
+    )
 
     try:
         body = await request.json()
@@ -2311,15 +2316,31 @@ async def model_structure(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     source_path = str(body.get("path", "")).strip()
+    structure_string = str(body.get("structure_string", ""))
     session_id = str(body.get("session_id", "")).strip()
     operation = str(body.get("operation", "")).strip().lower()
     params = body.get("params") or {}
-    if not source_path or not operation or not isinstance(params, dict):
-        raise HTTPException(status_code=400, detail="path, operation, and params are required")
+    if (
+        (not source_path and not structure_string)
+        or not operation
+        or not isinstance(params, dict)
+    ):
+        raise HTTPException(status_code=400, detail="A source structure, operation, and params are required")
+    if len(structure_string) > 50_000_000:
+        raise HTTPException(status_code=400, detail="Current structure payload is too large")
 
-    resolved = _resolve_readable_file_path(source_path, session_id)
-    if not resolved.is_file():
-        raise HTTPException(status_code=404, detail="Source structure not found")
+    def load_source_path():
+        resolved = _resolve_readable_file_path(source_path, session_id)
+        if not resolved.is_file():
+            raise HTTPException(status_code=404, detail="Source structure not found")
+        return _ase_read_structure(resolved)
+
+    try:
+        source = load_working_structure(structure_string, load_source_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot parse current structure: {exc}")
 
     secondary = None
     secondary_path = str(params.get("secondary_path", "")).strip()
@@ -2331,7 +2352,7 @@ async def model_structure(request: Request) -> JSONResponse:
 
     try:
         result = apply_modeling_operation(
-            _ase_read_structure(resolved), operation, params, secondary=secondary
+            source, operation, params, secondary=secondary
         )
         output_dir = _get_workdir_for_session(session_id).resolve()
         output_path = save_generated_structure(result, output_dir, operation)
@@ -2357,13 +2378,56 @@ async def model_structure(request: Request) -> JSONResponse:
     })
 
 
+@app.post("/api/structure/save")
+async def save_edited_structure(request: Request) -> JSONResponse:
+    """Validate and persist an atom-edited ExtXYZ structure as a new artifact."""
+    from io import StringIO
+
+    from ase.io import read as ase_read, write as ase_write
+    from structure_modeling import save_generated_structure
+
+    try:
+        body = await request.json()
+        structure_string = str(body.get("structure_string", ""))
+        session_id = str(body.get("session_id", "")).strip()
+        if not structure_string or len(structure_string) > 50_000_000:
+            raise HTTPException(status_code=400, detail="Invalid edited structure payload")
+        atoms = ase_read(StringIO(structure_string), format="extxyz")
+        output_path = save_generated_structure(
+            atoms, _get_workdir_for_session(session_id).resolve(), "edited-structure"
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot save edited structure: {exc}")
+
+    structure_buf = StringIO()
+    ase_write(structure_buf, atoms, format="extxyz")
+    owner_id, _ = _load_session_state(session_id) if session_id else (None, {})
+    response_path = (
+        _control_plane_path_to_worker(owner_id, output_path) if owner_id else str(output_path)
+    )
+    return JSONResponse({
+        "path": response_path,
+        "structure_string": structure_buf.getvalue(),
+        "formula": atoms.get_chemical_formula(),
+        "n_atoms": len(atoms),
+        "periodic": bool(atoms.pbc.any()),
+        "operation": "atom-edit",
+    })
+
+
 @app.post("/api/structure/interfaces")
 async def build_interface_candidates(request: Request) -> JSONResponse:
     """Generate coherent ZSL interface candidates without saving all candidates."""
     from io import StringIO
 
     from ase.io import write as ase_write
-    from structure_modeling import ModelingError, generate_coherent_interfaces
+    from structure_modeling import (
+        ModelingError,
+        generate_coherent_interfaces,
+        load_working_structure,
+    )
 
     try:
         body = await request.json()
@@ -2371,20 +2435,39 @@ async def build_interface_candidates(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     film_path = str(body.get("path", "")).strip()
+    structure_string = str(body.get("structure_string", ""))
     substrate_path = str(body.get("secondary_path", "")).strip()
     session_id = str(body.get("session_id", "")).strip()
     params = body.get("params") or {}
-    if not film_path or not substrate_path or not isinstance(params, dict):
-        raise HTTPException(status_code=400, detail="Film path, substrate path, and params are required")
+    if (
+        (not film_path and not structure_string)
+        or not substrate_path
+        or not isinstance(params, dict)
+    ):
+        raise HTTPException(status_code=400, detail="Film structure, substrate path, and params are required")
+    if len(structure_string) > 50_000_000:
+        raise HTTPException(status_code=400, detail="Current structure payload is too large")
 
-    film_resolved = _resolve_readable_file_path(film_path, session_id)
     substrate_resolved = _resolve_readable_file_path(substrate_path, session_id)
-    if not film_resolved.is_file() or not substrate_resolved.is_file():
-        raise HTTPException(status_code=404, detail="Film or substrate structure not found")
+    if not substrate_resolved.is_file():
+        raise HTTPException(status_code=404, detail="Substrate structure not found")
+
+    def load_film_path():
+        film_resolved = _resolve_readable_file_path(film_path, session_id)
+        if not film_resolved.is_file():
+            raise HTTPException(status_code=404, detail="Film structure not found")
+        return _ase_read_structure(film_resolved)
+
+    try:
+        film = load_working_structure(structure_string, load_film_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot parse current film structure: {exc}")
 
     try:
         candidates = generate_coherent_interfaces(
-            _ase_read_structure(film_resolved),
+            film,
             _ase_read_structure(substrate_resolved),
             params,
         )

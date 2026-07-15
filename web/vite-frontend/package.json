@@ -16,10 +16,10 @@
     "ketcher-react": "^3.17.0",
     "ketcher-standalone": "^3.17.0",
     "marked": "^11.1.1",
-    "matterviz": "^0.4.2",
     "process": "^0.11.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "three": "^0.178.0",
     "svelte": "^5.56.4",
     "vis-data": "^7.1.9",
     "vis-network": "^9.1.9"

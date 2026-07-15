@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
 import pytest
 from ase import Atoms
 from ase.build import bulk
+from ase.io import write as ase_write
 
 
 def _load_modeling_module():
@@ -21,6 +23,25 @@ def _load_modeling_module():
 
 
 modeling = _load_modeling_module()
+
+
+def test_working_structure_snapshot_takes_precedence_over_source_artifact():
+    original = bulk("Cu", "fcc", a=3.6, cubic=True)
+    moved = original.copy()
+    moved.positions[0] += [0.4, 0.5, 0.6]
+    snapshot = StringIO()
+    ase_write(snapshot, moved, format="extxyz")
+    fallback_called = False
+
+    def load_original():
+        nonlocal fallback_called
+        fallback_called = True
+        return original
+
+    working = modeling.load_working_structure(snapshot.getvalue(), load_original)
+
+    assert not fallback_called
+    assert np.allclose(working.positions, moved.positions)
 
 
 def test_surface_builder_preserves_periodicity_and_adds_vacuum():
@@ -58,6 +79,18 @@ def test_molecule_can_be_created_or_appended():
     assert water.get_chemical_formula() == "H2O"
     assert np.allclose(water.get_center_of_mass(), [1, 2, 3])
     assert len(combined) == len(bulk("Cu", "fcc")) + 3
+
+
+def test_crystal_is_created_through_matcraft_bulk_builder():
+    copper = modeling.apply_modeling_operation(
+        Atoms(),
+        "crystal",
+        {"symbol": "Cu", "crystal_structure": "fcc", "a": 3.6, "cubic": True},
+    )
+
+    assert copper.get_chemical_formula() == "Cu4"
+    assert np.allclose(copper.cell.lengths(), [3.6, 3.6, 3.6])
+    assert copper.pbc.all()
 
 
 def test_smiles_generates_explicit_hydrogen_3d_molecule():

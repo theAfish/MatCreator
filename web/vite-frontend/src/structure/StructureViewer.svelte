@@ -1,28 +1,11 @@
 <script>
   import { onDestroy, onMount, tick, untrack } from "svelte";
-  import { Structure } from "matterviz/structure";
-  import { Quaternion, Vector3 } from "three";
-  import { ViewportGizmo } from "three-viewport-gizmo";
+  import { createStructureRenderer } from "./renderer.js";
+  import { fractionalCoordinates, parseStructure, rendererAtoms, rendererLattice, serializeStructure } from "./model.js";
 
   // The structure is rotated so crystallographic Z points up. Apply that exact
   // rotation to the gizmo itself so its original X/Y/Z handles, labels, colors,
   // and click targets refer to the same crystal directions.
-  const gizmoFrameRotation = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2);
-  const gizmoPatchFlag = Symbol.for("matcreator.crystal-frame-gizmo");
-  if (!ViewportGizmo.prototype[gizmoPatchFlag]) {
-    const updateOrientation = ViewportGizmo.prototype._updateOrientation;
-    const setOrientation = ViewportGizmo.prototype._setOrientation;
-    ViewportGizmo.prototype._updateOrientation = function (fromCamera = true) {
-      updateOrientation.call(this, fromCamera);
-      this.quaternion.multiply(gizmoFrameRotation);
-      this.updateMatrixWorld();
-    };
-    ViewportGizmo.prototype._setOrientation = function (axis) {
-      return setOrientation.call(this, axis.clone().applyQuaternion(gizmoFrameRotation));
-    };
-    Object.defineProperty(ViewportGizmo.prototype, gizmoPatchFlag, { value: true });
-  }
-
   let {
     structure_string,
     source_path,
@@ -35,6 +18,8 @@
   let structure = $state();
   let selectedSites = $state([]);
   let viewerMode = $state("edit-atoms");
+  let transformMode = $state("translate");
+  let dirty = $state(false);
   let atomInspectorKey = $state("");
   let selectedElement = $state("");
   let periodicTableOpen = $state(false);
@@ -45,6 +30,7 @@
   let localRedoStack = $state([]);
   let initializedStructure;
   let currentStructureString = $state(untrack(() => structure_string));
+  let workingStructureString = $derived(structure ? serializeStructure(structure) : currentStructureString);
   let currentPath = $state(untrack(() => source_path));
   let revision = $state(0);
   let workbenchOpen = $state(false);
@@ -88,9 +74,12 @@
   let loadingStructureFiles = $state(false);
   let sketcherOpen = $state(false);
   let sketcherLoading = $state(false);
-  let sketcherHost;
-  let ketcherApi;
+  let sketcherHost = $state();
+  let ketcherApi = $state();
   let destroyKetcher;
+  let viewerHost;
+  let structureRenderer;
+  let theme = $state("dark");
 
   const periodicElements = [
     ["H", "He"], ["Li", "Be", "B", "C", "N", "O", "F", "Ne"],
@@ -124,15 +113,6 @@
   };
 
   const fileName = (path) => String(path || "").split(/[\\/]/).pop() || "Current structure";
-  // MatterViz uses Y as the rendered vertical direction. View along X and rotate
-  // the structure so crystallographic Z maps to rendered +Y.
-  const defaultSceneProps = {
-    auto_rotate: 0,
-    camera_direction: [1, 0, 0],
-    rotation: [-Math.PI / 2, 0, 0],
-    preserve_pbc_image_appearance: true,
-  };
-
   const activeSelectedSite = $derived(
     selectedSites.length === 1 ? structure?.sites?.[selectedSites[0]] : undefined,
   );
@@ -140,13 +120,18 @@
   const formatCoordinate = (value) => Number(value).toFixed(4);
 
   function snapshotStructure(value) {
-    return structuredClone(value);
+    return $state.snapshot(value);
   }
 
   function pushLocalHistory() {
     if (!structure) return;
     localUndoStack = [...localUndoStack.slice(-19), snapshotStructure(structure)];
     localRedoStack = [];
+  }
+
+  function markModified() {
+    dirty = true;
+    on_modified?.();
   }
 
   function restoreLocalHistory(direction) {
@@ -164,20 +149,6 @@
     structure = restored;
     selectedSites = [];
     return true;
-  }
-
-  function fractionalCoordinates(xyz) {
-    const matrix = structure?.lattice?.matrix;
-    if (!matrix || matrix.length !== 3) return [...xyz];
-    const [[a, b, c], [d, e, f], [g, h, i]] = matrix.map((row) => row.map(Number));
-    const determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-    if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-12) return [...xyz];
-    const inverse = [
-      [(e * i - f * h) / determinant, (c * h - b * i) / determinant, (b * f - c * e) / determinant],
-      [(f * g - d * i) / determinant, (a * i - c * g) / determinant, (c * d - a * f) / determinant],
-      [(d * h - e * g) / determinant, (b * g - a * h) / determinant, (a * e - b * d) / determinant],
-    ];
-    return inverse[0].map((_, column) => xyz.reduce((sum, value, row) => sum + value * inverse[row][column], 0));
   }
 
   function syncAtomInspector() {
@@ -208,7 +179,7 @@
     }
     error = "";
     pushLocalHistory();
-    const abc = fractionalCoordinates(xyz);
+    const abc = fractionalCoordinates(xyz, structure);
     structure = {
       ...structure,
       sites: structure.sites.map((site, index) => index === siteIndex
@@ -223,24 +194,73 @@
     };
   }
 
-  function deleteSelectedAtom() {
-    const siteIndex = selectedSites.length === 1 ? selectedSites[0] : -1;
-    if (!structure?.sites?.[siteIndex]) return;
+  function deleteSelectedAtoms() {
+    const deleted = new Set(selectedSites.filter((index) => structure?.sites?.[index]));
+    if (!deleted.size) return;
     const bonds = structure.properties?.bonds || [];
     pushLocalHistory();
+    const nextIndex = new Map();
+    let offset = 0;
+    structure.sites.forEach((_, index) => {
+      if (deleted.has(index)) offset += 1;
+      else nextIndex.set(index, index - offset);
+    });
     const remainingBonds = bonds
-      .filter((bond) => bond.site_idx_1 !== siteIndex && bond.site_idx_2 !== siteIndex)
+      .filter((bond) => !deleted.has(bond.site_idx_1) && !deleted.has(bond.site_idx_2))
       .map((bond) => ({
         ...bond,
-        site_idx_1: bond.site_idx_1 > siteIndex ? bond.site_idx_1 - 1 : bond.site_idx_1,
-        site_idx_2: bond.site_idx_2 > siteIndex ? bond.site_idx_2 - 1 : bond.site_idx_2,
+        site_idx_1: nextIndex.get(bond.site_idx_1),
+        site_idx_2: nextIndex.get(bond.site_idx_2),
       }));
     structure = {
       ...structure,
-      sites: structure.sites.filter((_, index) => index !== siteIndex),
+      sites: structure.sites.filter((_, index) => !deleted.has(index)),
       properties: { ...(structure.properties || {}), bonds: remainingBonds },
     };
     selectedSites = [];
+  }
+
+  // Adapted from AtomClay's createAtomAtCenter action. The lattice center is
+  // used for crystals; molecules use the Cartesian centroid (or origin).
+  function createAtomAtCenter() {
+    if (!structure) return;
+    pushLocalHistory();
+    const lattice = structure.lattice?.matrix;
+    const xyz = lattice?.length === 3
+      ? [0, 1, 2].map((axis) => lattice.reduce((sum, row) => sum + Number(row[axis]), 0) / 2)
+      : structure.sites?.length
+        ? [0, 1, 2].map((axis) => structure.sites.reduce((sum, site) => sum + Number(site.xyz[axis]), 0) / structure.sites.length)
+        : [0, 0, 0];
+    const element = elementSymbols.has(selectedElement) ? selectedElement : "C";
+    const site = { label: element, species: [{ element, occu: 1, oxidation_state: 0 }], xyz, abc: fractionalCoordinates(xyz, structure) };
+    structure = { ...structure, sites: [...(structure.sites || []), site] };
+    selectedSites = [structure.sites.length - 1];
+    transformMode = "translate";
+  }
+
+  async function saveLocalEdits() {
+    if (!dirty || busy) return;
+    busy = true;
+    error = "";
+    status = "Saving edited structure…";
+    try {
+      const response = await fetch("/api/structure/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id, structure_string: serializeStructure(structure) }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      currentPath = data.path;
+      dirty = false;
+      status = `${data.formula} · ${data.n_atoms} atoms · saved as ${fileName(data.path)}`;
+      on_generated?.(data);
+    } catch (saveError) {
+      error = String(saveError?.message || saveError);
+      status = "";
+    } finally {
+      busy = false;
+    }
   }
 
   async function selectOperation(nextOperation) {
@@ -300,7 +320,8 @@
     currentStructureString = data.structure_string;
     currentPath = data.path;
     initializedStructure = undefined;
-    structure = undefined;
+    structure = parseStructure(currentStructureString);
+    dirty = false;
     revision += 1;
     status = `${data.formula} · ${data.n_atoms} atoms · saved as ${data.path.split(/[\\/]/).pop()}`;
     on_generated?.(data);
@@ -313,7 +334,7 @@
     error = "";
     await tick();
     try {
-      const { mountKetcher } = await import("./KetcherBridge.jsx");
+      const { mountKetcher } = await import("../KetcherBridge.jsx");
       destroyKetcher?.();
       destroyKetcher = await mountKetcher(sketcherHost, {
         initialSmiles: moleculeSmiles,
@@ -351,9 +372,51 @@
 
   onDestroy(() => destroyKetcher?.());
 
+  $effect(() => {
+    const nextBackground = theme === "light" ? "#f8fbff" : "#06080f";
+    viewerHost?.style.setProperty("background", nextBackground);
+    structureRenderer?.setTheme?.(theme);
+  });
+
   onMount(() => {
-    // Keep MatterViz's keyboard-only add/change/delete shortcuts out of this
-    // viewer. Atom mutations are intentionally performed by this inspector.
+    theme = background_color === "#f8fbff" ? "light" : "dark";
+    const onThemeChange = (event) => {
+      theme = event.detail === "light" ? "light" : "dark";
+      structureRenderer?.setTheme?.(theme);
+    };
+    window.addEventListener("matcreator-theme-change", onThemeChange);
+    try {
+      structure = parseStructure(currentStructureString);
+      structureRenderer = createStructureRenderer().init(viewerHost, {
+        background: background_color || "#06080f",
+        onSelect: (id, additive) => {
+          if (id === null) selectedSites = additive ? selectedSites : [];
+          else selectedSites = additive
+            ? (selectedSites.includes(id) ? selectedSites.filter((item) => item !== id) : [...selectedSites, id])
+            : [id];
+        },
+        onMove: (movedAtoms) => {
+          if (!structure?.sites || !movedAtoms?.some(({ id }) => structure.sites[id])) return;
+          pushLocalHistory();
+          structure = {
+            ...structure,
+            sites: structure.sites.map((site, index) => {
+              const movedAtom = movedAtoms.find(({ id }) => id === index);
+              if (!movedAtom) return site;
+              const xyz = movedAtom.xyz.map(Number);
+              return { ...site, xyz, abc: fractionalCoordinates(xyz, structure) };
+            }),
+          };
+        },
+        onBoxSelect: (ids, additive) => {
+          selectedSites = additive ? [...new Set([...selectedSites, ...ids])] : ids;
+        },
+      });
+      structureRenderer.sync({ atoms: rendererAtoms(structure), lattice: rendererLattice(structure) });
+    } catch (rendererError) {
+      error = `Could not load structure viewer: ${rendererError?.message || rendererError}`;
+    }
+
     const suppressBuiltInAtomShortcuts = (event) => {
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
@@ -371,16 +434,30 @@
       if (["a", "e", "delete", "backspace"].includes(event.key.toLowerCase())) {
         event.preventDefault();
         event.stopImmediatePropagation();
+        if (["delete", "backspace"].includes(event.key.toLowerCase())) deleteSelectedAtoms();
       }
     };
     window.addEventListener("keydown", suppressBuiltInAtomShortcuts, true);
-    return () => window.removeEventListener("keydown", suppressBuiltInAtomShortcuts, true);
+    return () => {
+      window.removeEventListener("keydown", suppressBuiltInAtomShortcuts, true);
+      window.removeEventListener("matcreator-theme-change", onThemeChange);
+      structureRenderer?.dispose();
+    };
   });
 
   $effect(() => {
     void structure;
+    structureRenderer?.sync({ atoms: rendererAtoms(structure), lattice: rendererLattice(structure) });
+  });
+
+  $effect(() => {
     void selectedSites;
     syncAtomInspector();
+    structureRenderer?.select(selectedSites);
+  });
+
+  $effect(() => {
+    structureRenderer?.setTransformMode(transformMode);
   });
 
   function operationParams() {
@@ -417,6 +494,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           path: currentPath,
+          structure_string: workingStructureString,
           session_id,
           operation,
           params: operationParams(),
@@ -445,6 +523,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           path: currentPath,
+          structure_string: workingStructureString,
           secondary_path: secondaryPath,
           session_id,
           params: {
@@ -508,29 +587,14 @@
     }
     if (structure !== initializedStructure) {
       initializedStructure = structure;
-      on_modified?.();
+      markModified();
     }
   });
 </script>
 
-<div class="matterviz-embed">
-  {#key revision}
-    <Structure
-      structure_string={currentStructureString}
-      bind:structure
-      show_controls="always"
-      allow_file_drop={false}
-      enable_info_pane={false}
-      enable_measure_mode
-      bind:measure_mode={viewerMode}
-      bind:selected_sites={selectedSites}
-      {background_color}
-      {performance_mode}
-      scene_props={defaultSceneProps}
-      on_bonds_change={() => on_modified?.()}
-      style="width: 100%; height: 100%; min-height: 0;"
-    />
-  {/key}
+<div class="structure-viewer-embed">
+  <div class="structure-renderer-host" bind:this={viewerHost} aria-label="Interactive structure viewer"></div>
+  <div class="structure-interaction-hint">Orbit · Zoom · Shift-drag select · Axis widget align</div>
 
   <nav class="model-tools" aria-label="Structure modeling tools">
     <button disabled={!localUndoStack.length} title="Undo local atom edit (Ctrl+Z)" aria-label="Undo local atom edit" onclick={() => restoreLocalHistory("undo")}>
@@ -539,8 +603,20 @@
     <button disabled={!localRedoStack.length} title="Redo local atom edit (Ctrl+Y)" aria-label="Redo local atom edit" onclick={() => restoreLocalHistory("redo")}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5m5-5H10a6 6 0 0 0 0 12" /></svg>
     </button>
+    <button disabled={!dirty || busy} title="Save edited structure" aria-label="Save edited structure" onclick={saveLocalEdits}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5V4Zm3 0v6h8V4M8 20v-6h8v6" /></svg>
+    </button>
     <button class:active={viewerMode === "edit-atoms"} title="Atom editor" aria-label="Atom editor" onclick={() => { viewerMode = "edit-atoms"; selectedSites = []; }}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10-3.5-3.5-10 10L4 20Zm9-12 3.5 3.5M14 4l2-2 4 4-2 2" /></svg>
+    </button>
+    <button title="Add atom at structure center" aria-label="Add atom at structure center" onclick={createAtomAtCenter}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="12" r="5" /><path d="M18 5v6M15 8h6" /></svg>
+    </button>
+    <button class:active={transformMode === "translate"} disabled={!selectedSites.length} title="Move selected atoms" aria-label="Move selected atoms" onclick={() => transformMode = "translate"}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18m-9-9-3 3m3-3 3 3m-3 15-3-3m3 3 3-3M3 12l3-3m-3 3 3 3m15-3-3-3m3 3-3 3" /></svg>
+    </button>
+    <button class:active={transformMode === "rotate"} disabled={!selectedSites.length} title="Rotate selected atoms" aria-label="Rotate selected atoms" onclick={() => transformMode = "rotate"}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a8 8 0 1 0 1 6M19 8V3m0 5h-5" /></svg>
     </button>
     <button class:active={workbenchOpen && operation === "surface"} title="Surface slab" aria-label="Surface slab" onclick={() => void selectOperation("surface")}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17h16M6 13h12M8 9h8M10 5h4" /></svg>
@@ -671,7 +747,7 @@
       {/if}
       {#if error}<div class="model-error">{error}</div>{/if}
       {#if status}<div class="model-status">{status}</div>{/if}
-      <p class="model-note">Atom movement, deletion, element changes, and bond editing remain available under MatterViz’s edit menu. Each builder creates a new ExtXYZ file.</p>
+      <p class="model-note">Atom movement, deletion, and element changes are available in this local viewer. Each builder creates a new ExtXYZ file.</p>
     </aside>
   {/if}
 
@@ -713,14 +789,15 @@
       </div>
       <p>Drag the colored transform arrows to move the selected atom along the displayed crystal axes.</p>
       <div class="inspector-actions">
-        <button class="secondary-button" type="button" onclick={deleteSelectedAtom}>Delete atom</button>
+        <button class="secondary-button" type="button" onclick={deleteSelectedAtoms}>Delete atom</button>
         <button class="build-button" type="button" onclick={applyAtomInspector}>Apply</button>
       </div>
     </aside>
   {:else if viewerMode === "edit-atoms" && selectedSites.length > 1}
     <aside class="atom-inspector atom-selection-summary">
       <header><div><strong>{selectedSites.length} atoms selected</strong><span>Transform group</span></div><button class="close-button" title="Clear selection" aria-label="Clear selection" onclick={() => selectedSites = []}>×</button></header>
-      <p>Drag the small red, green, or blue arrows at the selection center to move the group. The large axis widget in the lower-right only changes the view. Select one atom to edit its element and Cartesian coordinates.</p>
+      <p>Shift-drag on empty space to box-select. Ctrl/Cmd-click adds or removes individual atoms. Select one atom to edit its element and Cartesian coordinates.</p>
+      <button class="secondary-button" type="button" onclick={deleteSelectedAtoms}>Delete selected atoms</button>
     </aside>
   {/if}
 
@@ -740,7 +817,7 @@
 </div>
 
 <style>
-  .matterviz-embed {
+  .structure-viewer-embed {
     --border-radius: 3pt;
     --ctrl-btn-icon-size: clamp(0.7rem, 2cqmin, 0.85rem);
     --z-index-overlay-controls: 100000000;
@@ -753,8 +830,10 @@
     position: relative;
     overflow: hidden;
   }
+  .structure-renderer-host { position: absolute; inset: 0; min-height: 0; overflow: hidden; }
+  .structure-interaction-hint { position: absolute; z-index: 840; left: 50%; bottom: 12px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 140px); padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); border-radius: 7px; color: var(--muted); background: rgba(var(--panel-rgb), .72); font: 11px/1.3 'Manrope', system-ui, sans-serif; white-space: nowrap; pointer-events: none; }
 
-  .matterviz-embed :global(button) {
+  .structure-viewer-embed :global(button) {
     color: inherit;
     cursor: pointer;
     border: none;
@@ -762,7 +841,6 @@
 
   .model-tools {
     position: absolute;
-    /* MatterViz panes use 1,000+ and dialogs use its overlay z-index tokens. */
     z-index: 900;
     top: 10px;
     left: 10px;
@@ -829,7 +907,6 @@
   .atom-inspector label { display: grid; gap: 5px; margin: 9px 0; color: var(--muted); font-weight: 550; }
   .atom-inspector :is(input, select) { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--subtle-surface); font: inherit; font-weight: 400; outline: none; }
   .atom-inspector :is(input, select):focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
-  .atom-inspector select option, .atom-inspector select optgroup { color: var(--text); background: var(--panel); }
   .element-picker { position: relative; display: grid; gap: 5px; margin: 9px 0; color: var(--muted); font-weight: 550; }
   .element-picker-button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 8px; border: 1px solid var(--border) !important; border-radius: 8px; color: var(--text); background: var(--subtle-surface); text-align: left; font: inherit; }
   .element-picker-button:hover { border-color: var(--accent) !important; }
