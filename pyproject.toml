@@ -1,11 +1,14 @@
 [project]
 name = "matcreator"
-version = "2.10.0"
+version = "2.11.0"
 description = "A multi-agent framework for complex computational material tasks."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ase>=3.26.0",
+    "matplotlib>=3.8.0",
+    "phonopy>=2.38.0",
+    "seekpath>=2.1.0",
     "rdkit>=2025.9.1",
     "google-adk>=1.28.0",
     "google-cloud-storage",
@@ -44,6 +47,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "matcreator" = [
     "skills/**/*.md",
+    "skills/**/*.py",
     "skills/**/*.yaml",
     "knowledge/MEMORY.md",
     "agents/subagent.yaml",
