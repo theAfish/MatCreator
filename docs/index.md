@@ -6,6 +6,7 @@ MatCreator is an agentic AI platform for computational materials science. It hel
 
 - [Getting Started](getting-started.md): install MatCreator, configure LLM credentials, and run the first CLI or web session.
 - [Overview](overview.md): understand the MatCreator harness architecture and runtime flow.
+- [Architecture Components](architecture_components.md): understand the frontend, middleware, agent framework, and how requests move between them.
 - [Deployment](deployment.md): run MatCreator as a personal application or deploy it as a shared server.
 - [Knowledge](knowledge/index.md): learn how MatCreator stores skills, guides, working memory, and distilled knowledge.
 
