@@ -719,7 +719,7 @@
 
 /* message styling uses shared tokens; theme blocks override only color tokens */
 .agent-message .message-bubble {
-  background: linear-gradient(135deg, var(--agent-bg-1), var(--agent-bg-2));
+  background: var(--agent-bg-1);
   border: 1px solid var(--agent-border);
   box-shadow: var(--msg-box-shadow-offset) var(--agent-box-shadow-color);
   padding: var(--msg-padding);
@@ -727,7 +727,7 @@
 .user-message .message-bubble {
   flex: 0 1 auto;
   max-width: min(72%, 760px);
-  background: linear-gradient(135deg, var(--user-bg-1), var(--user-bg-2));
+  background: var(--user-bg-1);
   border: 1px solid var(--user-border);
   box-shadow: var(--msg-box-shadow-offset) var(--user-box-shadow-color);
 }
@@ -737,9 +737,30 @@
 }
 
 .step-feed-message .message-bubble {
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.10), rgba(125, 211, 252, 0.06));
-  border-color: rgba(16, 185, 129, 0.24);
+  --step-feed-header-bg: var(--step-feed-idle-bg);
+  background: var(--agent-bg-1);
+  border-color: var(--step-feed-idle-border);
+  overflow: hidden;
+  padding: 0;
 }
+
+.step-feed-message[data-step-status="success"] .message-bubble {
+  --step-feed-header-bg: var(--step-feed-success-bg);
+  border-color: var(--step-feed-success-border);
+}
+
+.step-feed-message[data-step-status="running"] .message-bubble,
+.step-feed-message[data-step-status="needs_replanning"] .message-bubble {
+  --step-feed-header-bg: var(--step-feed-warning-bg);
+  border-color: var(--step-feed-warning-border);
+}
+
+.step-feed-message[data-step-status="failed"] .message-bubble {
+  --step-feed-header-bg: var(--step-feed-danger-bg);
+  border-color: var(--step-feed-danger-border);
+}
+
+
 
 .step-feed-message .message-avatar {
   display: none;
@@ -769,8 +790,11 @@
   margin-bottom: 0;
 }
 
+.step-feed-bubble > .step-feed-child-section {
+  padding: 0 16px 12px;
+}
+
 .step-feed-child-message .step-feed-bubble {
-  background: linear-gradient(135deg, rgba(125, 211, 252, 0.08), rgba(16, 185, 129, 0.06));
   box-shadow: var(--step-feed-message-box-shadow);
 }
 
@@ -792,6 +816,9 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  padding: var(--msg-padding);
+  background: var(--step-feed-header-bg);
+  cursor: pointer;
 }
 
 .step-feed-summary::before {
@@ -854,7 +881,7 @@
 }
 
 .step-feed-body {
-  margin-top: 10px;
+  padding: 10px 16px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -992,7 +1019,9 @@ details.step-feed-nested {
   background: rgba(255, 255, 255, 0.03);
 }
 .markdown-content pre {
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--terminal-bg);
+  border: 1px solid var(--terminal-border);
+  color: var(--terminal-text);
   border-radius: 8px;
   padding: 10px 12px;
   margin: 4px 0;
@@ -1011,7 +1040,9 @@ details.step-feed-nested {
   font-size: 13px;
   line-height: 1;
   white-space: pre;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--terminal-bg);
+  border: 1px solid var(--terminal-border);
+  color: var(--terminal-text);
   border-radius: 8px;
   padding: 10px 12px;
   margin: 4px 0;
@@ -1249,6 +1280,16 @@ details.step-feed-nested {
     animation: none;
   }
 }
+
+/* Keep the composer visually separate from the chat surface in dark mode. */
+body[data-theme="dark"] .input-container,
+body[data-theme="dark"] .input-container[data-agent-mode="flash"],
+body[data-theme="dark"] .input-container[data-agent-mode="bench"] {
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
+  box-shadow: inset 0 1px 0 rgba(235, 238, 236, 0.04), 0 4px 14px rgba(0, 0, 0, 0.2);
+}
+
 .composer-input-row,
 .composer-toolbar {
   width: 100%;

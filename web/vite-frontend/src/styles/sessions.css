@@ -10,10 +10,7 @@
   min-height: 0;
 }
 .panel-block { border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: rgba(255, 255, 255, 0.02); }
-.block-header { font-weight: 700; color: #cbd5ff; letter-spacing: 0.2px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-body[data-theme="light"] .side-panel .block-header {
-  color: #233044;
-}
+.block-header { font-weight: 700; color: var(--text); letter-spacing: 0.2px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .panel-block > summary.block-header {
   cursor: pointer;
   list-style: none;
@@ -227,7 +224,6 @@ body[data-theme="light"] .custom-select-options li[aria-selected="true"] {
 }
 .remote-jobs-pane.is-expanded { height: min(30vh, 320px); overflow-y: auto; }
 .remote-jobs-pane .block-header { font-size: 12px; }
-body[data-theme="light"] .remote-jobs-pane .block-header { color: #233044; }
 .remote-jobs-pane .ghost:not(.refresh-button) { font-size: 11px; padding: 3px 8px; }
 .remote-jobs-toggle {
   align-items: center;

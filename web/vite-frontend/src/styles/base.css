@@ -1,20 +1,82 @@
-:root {
-  --bg: #0b0d14;
-  --panel: #0c111b;
-  --panel-rgb: 12, 17, 27;
-  --text: #e7edf7;
-  --muted: #8ca0c2;
-  --accent: #7dd3fc;
-  --accent-2: #60a5fa;
-  --border: rgba(255, 255, 255, 0.08);
+:root,
+:root[data-theme="dark"],
+body[data-theme="dark"] {
+  --bg-canvas: #121616;
+  --bg-surface: #191E1E;
+  --bg-elevated: #222828;
+  --bg-hover: #293030;
+  --bg-active: #333939;
+
+  --text-primary: #EBEEEC;
+  --text-secondary: #ADB5B1;
+  --text-muted: #747D79;
+  --text-disabled: #535B57;
+
+  --border-subtle: #2C3331;
+  --border-default: #3D4743;
+  --border-strong: #58635E;
+
+  --accent-primary: #C3644D;
+  --accent-primary-hover: #D37861;
+  --accent-primary-active: #A44E3A;
+  --accent-primary-soft: #412720;
+  --accent-on-primary: #1C0F0B;
+
+  --accent-secondary: #638295;
+  --accent-secondary-soft: #23333C;
+
+  --selection: #523028;
+  --focus-ring: #D18470;
+
+  --success: #6E9B89;
+  --warning: #D0A052;
+  --danger: #D16969;
+  --info: #7198B1;
+
+  /* Step-feed status surfaces: edit these direct colors to tune each state. */
+  --step-feed-idle-bg: #283536;
+  --step-feed-idle-border: #607D8C;
+  --step-feed-success-bg: #2E453C;
+  --step-feed-success-border: #66927E;
+  --step-feed-warning-bg: #4A3C27;
+  --step-feed-warning-border: #B88C49;
+  --step-feed-danger-bg: #4B3031;
+  --step-feed-danger-border: #B86466;
+
+  --timeline-badge-in-bg: #C3644D;
+  --timeline-badge-in-text: #1C0F0B;
+  --timeline-badge-out-bg: #6E9B89;
+  --timeline-badge-out-text: #121616;
+
+  /* Fixed terminal surface, intentionally shared by both themes. */
+  --terminal-bg: #121616;
+  --terminal-border: #2C3331;
+  --terminal-text: #EBEEEC;
+  --terminal-muted: #ADB5B1;
+
+  --session-item-hover-bg: #293030;
+  --session-item-hover-border: #3D4743;
+  --session-item-active-bg: #412720;
+  --session-item-active-border: #C3644D;
+
+  /* Legacy aliases used throughout the existing UI. */
+  --bg: var(--bg-canvas);
+  --panel: var(--bg-surface);
+  --panel-rgb: 25, 30, 30;
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --accent: var(--accent-primary);
+  --accent-2: var(--accent-primary-hover);
+  --accent-rgb: 195, 100, 77;
+  --border: var(--border-subtle);
   --radius: 8px;
   --panel-shadow: 0 12px 60px rgba(0, 0, 0, 0.4);
-  --popup-shadow: 0 18px 70px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(125, 211, 252, 0.06);
-  --modal-overlay: rgba(6, 8, 15, 0.88);
-  --subtle-surface: rgba(255, 255, 255, 0.03);
-  --scrollbar-track: rgba(6, 8, 15, 0.72);
-  --scrollbar-thumb: rgba(125, 211, 252, 0.22);
-  --scrollbar-thumb-hover: rgba(125, 211, 252, 0.38);
+  --popup-shadow: 0 18px 70px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(195, 100, 77, 0.06);
+  --modal-overlay: rgba(18, 22, 22, 0.88);
+  --subtle-surface: rgba(235, 238, 236, 0.03);
+  --scrollbar-track: rgba(18, 22, 22, 0.72);
+  --scrollbar-thumb: rgba(195, 100, 77, 0.22);
+  --scrollbar-thumb-hover: rgba(195, 100, 77, 0.38);
   --mono: 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono', 'Cascadia Mono', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
   --composer-height: 68px;
   --composer-gap: 16px;
@@ -22,47 +84,96 @@
   --msg-radius: 12px;
   --msg-padding: 12px 16px;
   --msg-box-shadow-offset: 3px 3px 3px;
-  --agent-box-shadow-color: rgba(148, 163, 184, 0.10);
-  --user-box-shadow-color: rgba(59, 130, 246, 0.10);
-  --agent-bg-1: rgba(148, 163, 184, 0.12);
-  --agent-bg-2: rgba(100, 116, 139, 0.08);
-  --agent-border: rgba(148, 163, 184, 0.25);
-  --user-bg-1: rgba(37, 99, 235, 0.24);
-  --user-bg-2: rgba(37, 99, 235, 0.16);
-  --user-border: rgba(59, 130, 246, 0.25);
+  --agent-box-shadow-color: rgba(173, 181, 177, 0.10);
+  --user-box-shadow-color: rgba(195, 100, 77, 0.10);
+  --agent-bg-1: var(--bg-elevated);
+  --agent-bg-2: var(--bg-surface);
+  --agent-border: var(--border-default);
+  --user-bg-1: var(--accent-primary-soft);
+  --user-bg-2: var(--bg-active);
+  --user-border: rgba(195, 100, 77, 0.35);
   --step-feed-message-box-shadow: none;
-  --step-feed-highlight-box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.22), 0 10px 30px rgba(125, 211, 252, 0.14);
+  --step-feed-highlight-box-shadow: 0 0 0 2px rgba(195, 100, 77, 0.22), 0 10px 30px rgba(195, 100, 77, 0.14);
 }
 
 body[data-theme="light"] {
-  --bg: #eaecf0;
-  --panel: #f8fbff;
-  --panel-rgb: 248, 251, 255;
-  --text: #132033;
-  --muted: #607086;
-  --accent: #0ea5e9;
-  --accent-2: #2563eb;
-  --border: rgba(19, 32, 51, 0.12);
-  --panel-shadow: 4px 4px 4px rgba(79, 95, 116, 0.13);
-  --popup-shadow: 0 18px 44px rgba(55, 70, 90, 0.18), 0 0 0 1px rgba(19, 32, 51, 0.08);
-  --modal-overlay: rgba(31, 42, 56, 0.28);
-  --subtle-surface: rgba(19, 32, 51, 0.035);
-  --scrollbar-track: rgba(226, 234, 242, 0.9);
-  --scrollbar-thumb: rgba(14, 165, 233, 0.28);
-  --scrollbar-thumb-hover: rgba(14, 165, 233, 0.46);
+  --bg-canvas: #ECEDEF;
+  --bg-surface: #F7F7F6;
+  --bg-elevated: #FFFFFF;
+
+  --text-primary: #22262C;
+  --text-secondary: #626972;
+  --text-muted: #959BA2;
+
+  --border-subtle: #D4D7DA;
+  --border-default: #D4D7DA;
+  --border-strong: #A9AEB5;
+
+  --accent-primary: #315C9A;
+  --accent-primary-hover: #264A7D;
+  --accent-primary-soft: #DDE6F2;
+
+  --accent-secondary: #B78A3D;
+  --accent-secondary-soft: #F0E4CC;
+
+  --selection: #C4D3E8;
+  --focus-ring: #6484B2;
+
+  --success: #4D786A;
+  --warning: #B5802B;
+  --danger: #B4494E;
+  --info: #416E9F;
+
+  /* Step-feed status surfaces: edit these direct colors to tune each state. */
+  --step-feed-idle-bg: #E7EEF3;
+  --step-feed-idle-border: #9CB4C4;
+  --step-feed-success-bg: #E3F0E9;
+  --step-feed-success-border: #83AA99;
+  --step-feed-warning-bg: #F5EBD8;
+  --step-feed-warning-border: #C6A05F;
+  --step-feed-danger-bg: #F5E2E3;
+  --step-feed-danger-border: #C48A8D;
+
+  --timeline-badge-in-bg: #C4D3E8;
+  --timeline-badge-in-text: #264A7D;
+  --timeline-badge-out-bg: #E8D39B;
+  --timeline-badge-out-text: #6C4A0F;
+
+  --session-item-hover-bg: #EEF1F4;
+  --session-item-hover-border: #C4D3E8;
+  --session-item-active-bg: #DDE6F2;
+  --session-item-active-border: #6484B2;
+
+  /* Legacy aliases used throughout the existing UI. */
+  --bg: var(--bg-canvas);
+  --panel: var(--bg-surface);
+  --panel-rgb: 247, 247, 246;
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --accent: var(--accent-primary);
+  --accent-2: var(--accent-primary-hover);
+  --accent-rgb: 49, 92, 154;
+  --border: var(--border-subtle);
+  --panel-shadow: 4px 4px 4px rgba(34, 38, 44, 0.13);
+  --popup-shadow: 0 18px 44px rgba(34, 38, 44, 0.18), 0 0 0 1px rgba(34, 38, 44, 0.08);
+  --modal-overlay: rgba(34, 38, 44, 0.28);
+  --subtle-surface: rgba(34, 38, 44, 0.035);
+  --scrollbar-track: rgba(236, 237, 239, 0.9);
+  --scrollbar-thumb: rgba(49, 92, 154, 0.28);
+  --scrollbar-thumb-hover: rgba(49, 92, 154, 0.46);
   /* Light-theme color tokens (only colors differ per theme) */
-  --agent-bg-1: #e7ebef;
-  --agent-bg-2: #f3f5f7;
-  --agent-border: rgba(71, 85, 105, 0.28);
-  --agent-box-shadow-color: rgba(71, 85, 105, 0.12);
+  --agent-bg-1: var(--bg-canvas);
+  --agent-bg-2: var(--bg-surface);
+  --agent-border: rgba(98, 105, 114, 0.28);
+  --agent-box-shadow-color: rgba(98, 105, 114, 0.12);
 
-  --user-bg-1: #dbeafe;
-  --user-bg-2: #eff6ff;
-  --user-border: rgba(37, 99, 235, 0.28);
-  --user-box-shadow-color: rgba(37, 99, 235, 0.14);
+  --user-bg-1: var(--accent-primary-soft);
+  --user-bg-2: var(--bg-elevated);
+  --user-border: rgba(49, 92, 154, 0.28);
+  --user-box-shadow-color: rgba(49, 92, 154, 0.14);
 
-  --step-feed-message-box-shadow: 0 8px 22px rgba(5, 150, 105, 0.13);
-  --step-feed-highlight-box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.16), 0 8px 22px rgba(14, 165, 233, 0.12);
+  --step-feed-message-box-shadow: 0 8px 22px rgba(77, 120, 106, 0.13);
+  --step-feed-highlight-box-shadow: 0 0 0 2px rgba(49, 92, 154, 0.16), 0 8px 22px rgba(49, 92, 154, 0.12);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }

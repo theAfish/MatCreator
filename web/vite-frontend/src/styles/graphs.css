@@ -145,7 +145,28 @@ body[data-theme="light"] .theme-icon-sun {
   min-height: 0;
   max-height: none;
   overflow: visible;
-  background: rgba(var(--panel-rgb), 0.42);
+  background: rgba(var(--panel-rgb), 0.32);
+}
+
+.graph-viewport::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.24;
+  background-image: radial-gradient(circle, rgba(148, 163, 184, 0.34) 0.65px, transparent 0.8px);
+  background-size: 22px 22px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14%, #000 84%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 14%, #000 84%, transparent);
+}
+
+body[data-theme="light"] .graph-viewport {
+  background: rgba(var(--panel-rgb), 0.5);
+}
+
+body[data-theme="light"] .graph-viewport::before {
+  opacity: 0.2;
+  background-image: radial-gradient(circle, rgba(71, 85, 105, 0.32) 0.65px, transparent 0.8px);
 }
 
 .graph-panel-title {

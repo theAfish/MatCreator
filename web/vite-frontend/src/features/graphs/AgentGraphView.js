@@ -1,20 +1,22 @@
 import { Network, DataSet } from "vis-network/standalone";
 
 const NODE_COLORS = {
-  orchestrator: { bg: "#7C3AED", border: "#6D28D9", font: "#fff" },
-  planning:     { bg: "#3B82F6", border: "#2563EB", font: "#fff" },
-  execution:    { bg: "#10B981", border: "#059669", font: "#fff" },
-  tester:       { bg: "#F59E0B", border: "#D97706", font: "#1a1a1a" },
-  step:         { bg: "#374151", border: "#4B5563", font: "#e5e7eb" },
+  orchestrator: { core: "124, 58, 237", edge: "196, 181, 253", font: "#f5f3ff" },
+  planning:     { core: "59, 130, 246", edge: "147, 197, 253", font: "#eff6ff" },
+  execution:    { core: "16, 185, 129", edge: "110, 231, 183", font: "#ecfdf5" },
+  tester:       { core: "245, 158, 11", edge: "253, 224, 71", font: "#fffbeb" },
+  step:         { core: "100, 116, 139", edge: "203, 213, 225", font: "#f8fafc" },
 };
 
 const STATUS_COLORS = {
-  running:          { bg: "#FBBF24", border: "#F59E0B", font: "#1a1a1a" },
+  running:          { core: "251, 191, 36", edge: "254, 240, 138", font: "#fffbeb" },
   success:          null,
-  failed:           { bg: "#EF4444", border: "#DC2626", font: "#fff" },
-  needs_replanning: { bg: "#F97316", border: "#EA580C", font: "#fff" },
-  idle:             { bg: "#374151", border: "#4B5563", font: "#9CA3AF" },
+  failed:           { core: "239, 68, 68", edge: "252, 165, 165", font: "#fff1f2" },
+  needs_replanning: { core: "249, 115, 22", edge: "253, 186, 116", font: "#fff7ed" },
+  idle:             { core: "71, 85, 105", edge: "148, 163, 184", font: "#cbd5e1" },
 };
+
+const rgba = (rgb, alpha) => `rgba(${rgb}, ${alpha})`;
 
 export class AgentGraphView {
   constructor(containerId, dependencies) {
@@ -34,6 +36,12 @@ export class AgentGraphView {
     this._pollInterval = null;
     this._didInitialFit = false;
     this._pendingFit = true;
+    this._animationFrame = null;
+    this._lastAnimationPaint = 0;
+    this._motionTime = 0;
+    this._activeEdges = [];
+    this._hasRunningNodes = false;
+    this._reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
     this._detailEl = document.getElementById("graph-detail");
     this._detailClose = document.getElementById("graph-detail-close");
     this._detailLabel = document.getElementById("detail-label");
@@ -66,6 +74,7 @@ export class AgentGraphView {
   }
 
   _init() {
+    const edgeColors = this._edgeColors();
     const options = {
       layout: {
         hierarchical: {
@@ -80,7 +89,7 @@ export class AgentGraphView {
       physics: { enabled: false },
       edges: {
         arrows: { to: { enabled: true, scaleFactor: 0.72 } },
-        color: { color: "#4B5563", highlight: "#9CA3AF" },
+        color: edgeColors,
         width: 2.4,
         smooth: { type: "cubicBezier", forceDirection: "vertical" },
       },
@@ -108,10 +117,31 @@ export class AgentGraphView {
       if (params.nodes.length) this._showDetail(params.nodes[0]);
     });
     this._network.on("deselectNode", () => this._hideDetail());
+    this._network.on("afterDrawing", (ctx) => this._drawActiveFlow(ctx));
+    window.addEventListener("matcreator-theme-change", () => this._applyTheme());
     this._detailClose?.addEventListener("click", () => {
       this._network.unselectAll();
       this._hideDetail();
     });
+  }
+
+  _edgeColors() {
+    // Keep these colors opaque. vis-network draws the arrowhead over the last
+    // segment of its edge; translucent colors compound at that seam and create
+    // a visibly darker/lighter patch.
+    return document.body.dataset.theme === "light"
+      ? { color: "#b8c2d0", highlight: "#64748b", hover: "#8290a3", inherit: false }
+      : { color: "#526176", highlight: "#cbd5e1", hover: "#94a3b8", inherit: false };
+  }
+
+  _applyTheme() {
+    const color = this._edgeColors();
+    const updates = this._edges.getIds().map((id) => ({ id, color }));
+    if (updates.length) this._edges.update(updates);
+
+    // Custom nodes read body[data-theme] while painting, so one immediate
+    // redraw keeps canvas pixels in lockstep with the surrounding CSS theme.
+    this._network?.redraw();
   }
 
   _nodeTooltip(raw) {
@@ -158,23 +188,63 @@ export class AgentGraphView {
       const selected = Boolean(state?.selected);
       const hover = Boolean(state?.hover);
       const drawRadius = radius + (selected ? 2 : hover ? 1 : 0);
-      const borderWidth = isRunning ? 2.5 : selected ? 3 : 2;
+      const borderWidth = isRunning ? 1.8 : selected ? 2.4 : 1.4;
 
       return {
         drawNode: () => {
+          // vis-network calls custom renderers once with NaN coordinates while
+          // measuring a new hierarchical node. Canvas gradients reject those
+          // values, so leave that sizing pass blank; nodeDimensions below are
+          // still returned and the following positioned redraw paints it.
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
           ctx.save();
+
+          const pulse = isRunning && !this._reduceMotion
+            ? (Math.sin(this._motionTime / 330 + x * 0.015) + 1) / 2
+            : 0.35;
+          const isLight = document.body.dataset.theme === "light";
+
+          // First paint an opaque backing plate. Edges are rendered on the
+          // layer below nodes, so this makes connections terminate cleanly at
+          // the badge boundary instead of showing through its colored face.
           ctx.beginPath();
           ctx.arc(x, y, drawRadius, 0, Math.PI * 2);
-          ctx.fillStyle = hover || selected ? colors.border : colors.bg;
+          ctx.fillStyle = isLight ? "#f5f7fb" : "#111827";
+          ctx.fill();
+
+          // A restrained, nearly-flat tint preserves type/status color while
+          // keeping the badge and its text diagram-sharp.
+          ctx.beginPath();
+          ctx.arc(x, y, drawRadius - 0.7, 0, Math.PI * 2);
+          ctx.fillStyle = rgba(colors.core, isLight
+            ? (hover || selected ? 0.3 : 0.2)
+            : (hover || selected ? 0.54 : 0.4));
           ctx.fill();
           ctx.lineWidth = borderWidth;
-          ctx.strokeStyle = colors.border;
-          if (isRunning) ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = rgba(colors.core, selected ? 1 : hover ? 0.9 : 0.76);
           ctx.stroke();
-          ctx.setLineDash([]);
 
-          ctx.fillStyle = colors.font;
-          ctx.font = `800 ${badge.length > 1 ? 10.5 : 12}px Manrope, system-ui, sans-serif`;
+          // A rotating broken orbit makes running state legible without a
+          // distracting whole-node scale animation.
+          if (isRunning) {
+            ctx.beginPath();
+            ctx.arc(
+              x,
+              y,
+              drawRadius + 4 + pulse,
+              this._motionTime / 700,
+              this._motionTime / 700 + Math.PI * 1.42,
+            );
+            ctx.lineWidth = 1.2;
+            ctx.lineCap = "round";
+            ctx.strokeStyle = rgba(colors.core, 0.48 + pulse * 0.34);
+            ctx.stroke();
+          }
+
+          ctx.fillStyle = isLight
+            ? (isRunning ? "#713f12" : "#172033")
+            : colors.font;
+          ctx.font = `800 ${badge.length > 1 ? 11 : 12.5}px Manrope, system-ui, sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           const metrics = ctx.measureText(badge);
@@ -204,13 +274,91 @@ export class AgentGraphView {
       label: "",
       shape: "custom",
       color: {
-        background: colors.bg,
-        border: colors.border,
-        highlight: { background: colors.border, border: colors.border },
+        background: rgba(colors.core, 0.28),
+        border: rgba(colors.edge, 0.64),
+        highlight: { background: rgba(colors.core, 0.48), border: rgba(colors.edge, 0.9) },
       },
       ctxRenderer: this._nodeRenderer(raw, colors, badge, radius, isRunning),
       title: this._nodeTooltip(raw),
     };
+  }
+
+  _drawActiveFlow(ctx) {
+    if (!this._network || !this._activeEdges.length) return;
+    const positions = this._network.getPositions();
+    const time = this._reduceMotion ? 0 : this._motionTime;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const edge of this._activeEdges) {
+      const from = positions[edge.from];
+      const to = positions[edge.to];
+      if (
+        !from || !to ||
+        !Number.isFinite(from.x) || !Number.isFinite(from.y) ||
+        !Number.isFinite(to.x) || !Number.isFinite(to.y)
+      ) continue;
+      const color = edge.color || NODE_COLORS.step;
+
+      // Match vis-network's vertically constrained cubic curve closely enough
+      // that the particles read as energy travelling inside the connection.
+      const pointOnCurve = (progress) => {
+        const inverse = 1 - progress;
+        const midY = (from.y + to.y) / 2;
+        return {
+          x: inverse ** 3 * from.x
+            + 3 * inverse ** 2 * progress * from.x
+            + 3 * inverse * progress ** 2 * to.x
+            + progress ** 3 * to.x,
+          y: inverse ** 3 * from.y
+            + 3 * inverse ** 2 * progress * midY
+            + 3 * inverse * progress ** 2 * midY
+            + progress ** 3 * to.y,
+        };
+      };
+
+      const particleCount = this._reduceMotion ? 1 : 2;
+      for (let index = 0; index < particleCount; index++) {
+        const progress = this._reduceMotion
+          ? 0.6
+          : ((time / 1500 + index / particleCount + edge.phase) % 1);
+        const point = pointOnCurve(progress);
+        const fade = Math.sin(progress * Math.PI);
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 2.1, 0, Math.PI * 2);
+        ctx.fillStyle = rgba(color.edge, 0.28 + fade * 0.62);
+        ctx.shadowColor = rgba(color.core, 0.9);
+        ctx.shadowBlur = 9;
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  _syncAnimation() {
+    if (!this._hasRunningNodes || this._reduceMotion) {
+      if (this._animationFrame !== null) cancelAnimationFrame(this._animationFrame);
+      this._animationFrame = null;
+      this._network?.redraw();
+      return;
+    }
+    if (this._animationFrame !== null) return;
+
+    const animate = (time) => {
+      this._motionTime = time;
+      // 30fps is smooth for slow orbital/flow motion and avoids paying for a
+      // full vis-network canvas redraw on every display refresh.
+      if (time - this._lastAnimationPaint >= 32) {
+        this._network?.redraw();
+        this._lastAnimationPaint = time;
+      }
+      if (this._hasRunningNodes) {
+        this._animationFrame = requestAnimationFrame(animate);
+      } else {
+        this._animationFrame = null;
+      }
+    };
+    this._animationFrame = requestAnimationFrame(animate);
   }
 
   _computeLevels(rawNodes, edges) {
@@ -374,6 +522,15 @@ export class AgentGraphView {
     this._nodeData = graphData.nodes;
     this._stepExecutionFeed.update(graphData);
     const displayEdges = this._buildDisplayEdges(rawNodes, graphData.edges || []);
+    const rawNodeMap = Object.fromEntries(rawNodes.map((node) => [node.id, node]));
+    this._hasRunningNodes = rawNodes.some((node) => node.status === "running");
+    this._activeEdges = displayEdges
+      .filter((edge) => rawNodeMap[edge.from]?.status === "running" || rawNodeMap[edge.to]?.status === "running")
+      .map((edge, index) => ({
+        ...edge,
+        color: STATUS_COLORS.running,
+        phase: (index * 0.173) % 1,
+      }));
     const levels = this._computeLevels(rawNodes, displayEdges);
     this._resizeSurface(levels);
     const nextNodeIds = new Set(rawNodes.map((raw) => raw.id));
@@ -412,7 +569,8 @@ export class AgentGraphView {
           to: e.to,
           hidden: false,
           physics: false,
-          width: 2.4,
+          width: 1.35,
+          color: this._edgeColors(),
           smooth: { type: "cubicBezier", forceDirection: "vertical" },
         });
       }
@@ -421,6 +579,7 @@ export class AgentGraphView {
     if (rawNodes.length > 0 && (topologyChanged || !this._didInitialFit || this._pendingFit)) {
       this._fitGraph();
     }
+    this._syncAnimation();
 
     if (this._activeDetailNodeId) {
       if (this._nodeData[this._activeDetailNodeId]) {
@@ -463,6 +622,11 @@ export class AgentGraphView {
     this._nodeData = {};
     this._didInitialFit = false;
     this._pendingFit = true;
+    this._hasRunningNodes = false;
+    this._activeEdges = [];
+    if (this._animationFrame !== null) cancelAnimationFrame(this._animationFrame);
+    this._animationFrame = null;
+    this._lastAnimationPaint = 0;
     this._resizeSurface([], { 0: 1 });
     this._hideDetail();
     this.stopPolling();
@@ -933,6 +1097,7 @@ export class StepExecutionFeed {
 
   _renderCard(outer, node, ancestors = new Set([node.id])) {
     outer.dataset.stepNodeId = node.id;
+    outer.dataset.stepStatus = node.status || "idle";
     outer.classList.toggle("step-feed-highlight", this._highlightedId === node.id);
 
     const bubble = outer.querySelector(".step-feed-bubble");
