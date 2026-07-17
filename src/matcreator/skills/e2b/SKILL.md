@@ -1,13 +1,13 @@
 ---
 name: e2b
-description: Submit and manage tracked remote E2B sandboxes for session-scoped computational work.
+description: Submit and manage tracked remote E2B sandboxes on Bohrium platform.
 metadata:
   tools:
     - submit_e2b_sandbox
     - get_e2b_job_status
     - pause_e2b_sandbox
     - terminate_e2b_sandbox
-  tags: [e2b, remote-job, sandbox, cloud-computing]
+  tags: [e2b, remote-job, sandbox, bohrium]
 ---
 
 # E2B Remote Sandbox Management
@@ -27,16 +27,13 @@ control the sandbox even after the agent or browser reconnects.
    the sandbox command. Both require the returned `job_id`.
 4. Record the returned `job_id` in the step result and use it for status and
    sandbox control.
-5. Do not invoke the E2B SDK directly, use `curl`, or expose API credentials in
-   commands, files, or responses.
+5. Call `terminate_e2b_sandbox` to RELEASE the sandbox when work is complete. 
 
 ## Controls
 
 - `get_e2b_job_status` reads the persisted provider snapshot.
 - `pause_e2b_sandbox` preserves the sandbox and pauses remote execution.
-- `terminate_e2b_sandbox` irreversibly kills the sandbox.
-- After a command succeeds, record or collect all required outputs before
-   calling `terminate_e2b_sandbox` to release sandbox resources.
+- `terminate_e2b_sandbox` releases the sandbox.
 
 The frontend can issue the same controls. Before continuing dependent work after
 a pause or termination, return a `needs_replanning` step result with the job ID

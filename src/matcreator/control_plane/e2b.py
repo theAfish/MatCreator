@@ -43,7 +43,7 @@ class E2BSandboxSpec:
             "metadata": self.metadata,
         }
 
-
+# The backend E2B SDK is imported lazily to avoid a hard dependency on the SDK for users who don't need it. The E2BSandboxAdapter class wraps the SDK and provides a simple interface for creating, connecting to, and managing E2B sandboxes.
 class E2BSandboxAdapter:
     """Small boundary around the E2B SDK with no SDK import at module load."""
 

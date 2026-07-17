@@ -9,6 +9,7 @@ class _FakeE2BAdapter:
         self.created_specs = []
         self.paused = []
         self.terminated = []
+        self.on_run = None
 
     def create(self, spec):
         self.created_specs.append(spec)
@@ -19,6 +20,11 @@ class _FakeE2BAdapter:
 
     def terminate(self, sandbox_id: str) -> None:
         self.terminated.append(sandbox_id)
+
+    def run_command(self, sandbox_id: str, command: str, *, user: str) -> dict:
+        if self.on_run:
+            self.on_run()
+        return {"stdout": "", "stderr": "", "exit_code": 0}
 
 
 def _connection() -> E2BConnectionConfig:
@@ -71,4 +77,31 @@ def test_e2b_job_controls_update_durable_state(tmp_path) -> None:
     terminated = service.terminate_e2b(paused["job_id"])
     assert terminated["status"] == "terminated"
     assert adapter.terminated == ["sandbox-123"]
+
+
+def test_e2b_command_merges_telemetry_after_monitor_observation(tmp_path) -> None:
+    adapter = _FakeE2BAdapter()
+    store = RemoteJobStore(tmp_path / "remote-jobs.db")
+    service = RemoteJobService(store, e2b_adapter=adapter)
+    job = service.submit_e2b(
+        owner_id="alice",
+        session_id="session-1",
+        idempotency_key="session-1:node-1:1",
+        connection=_connection(),
+    )
+
+    adapter.on_run = lambda: store.record_observation(
+        job["job_id"],
+        snapshot={"provider_status": "reachable", "monitor_probe": "fresh"},
+        expected_revision=store.get_job(job["job_id"])["state_revision"],
+    )
+
+    assert service.run_e2b_command(job["job_id"], "echo done") == {
+        "stdout": "", "stderr": "", "exit_code": 0
+    }
+    assert store.get_job(job["job_id"])["snapshot"] == {
+        "provider_status": "reachable",
+        "monitor_probe": "fresh",
+        "last_command_exit_code": 0,
+    }
 

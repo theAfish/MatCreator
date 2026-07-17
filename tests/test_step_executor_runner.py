@@ -1,5 +1,6 @@
-from pathlib import Path
+import asyncio
 import logging
+from pathlib import Path
 
 from matcreator.llm_cards import LLMCard
 from matcreator.agents.execution_agent.step_executor import (
@@ -10,6 +11,7 @@ from matcreator.agents.execution_agent.step_executor import (
 from matcreator.agents.execution_agent.step_executor_runner import (
     _artifact_allowed_roots,
     _build_step_content,
+    _schedule_step_runner_cleanup,
     _verify_step_result_artifacts,
 )
 from matcreator.agents.session_log import SESSION_ARTIFACTS_KEY
@@ -35,6 +37,36 @@ class _FakeState:
 
     def to_dict(self):
         return self._data
+
+
+def test_cancelled_runner_cleanup_is_scheduled_without_waiting():
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.closed = False
+            self.closed_event = asyncio.Event()
+
+        async def close(self) -> None:
+            self.closed = True
+            self.closed_event.set()
+
+    async def exercise() -> None:
+        release = asyncio.Event()
+
+        async def slow_task() -> None:
+            await release.wait()
+
+        runner = FakeRunner()
+        task = asyncio.create_task(slow_task())
+        _schedule_step_runner_cleanup(runner, (task,))
+
+        await asyncio.sleep(0)
+        assert not runner.closed
+
+        release.set()
+        await asyncio.wait_for(runner.closed_event.wait(), timeout=1)
+        assert runner.closed
+
+    asyncio.run(exercise())
 
 
 def test_success_with_missing_artifact_requires_replanning(tmp_path, caplog):

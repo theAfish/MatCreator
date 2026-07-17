@@ -302,6 +302,37 @@ class RemoteJobStore:
             self._append_event(connection, job_id, "observed", {"status": current["status"]}, now)
         return self.get_job(job_id) or {}
 
+    def merge_observation(
+        self,
+        job_id: str,
+        *,
+        snapshot: dict[str, Any],
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Merge non-lifecycle telemetry into the latest provider snapshot.
+
+        This intentionally does not accept an expected revision: command and
+        upload results may arrive while a monitor is recording provider state.
+        """
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM remote_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Remote job '{job_id}' was not found")
+            current = self._decode(row) or {}
+            merged_snapshot = {**current["snapshot"], **snapshot}
+            connection.execute(
+                """
+                UPDATE remote_jobs
+                SET snapshot = ?, error = ?, state_revision = state_revision + 1, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (json.dumps(merged_snapshot, sort_keys=True), error, now, job_id),
+            )
+            self._append_event(connection, job_id, "observed", {"status": current["status"]}, now)
+        return self.get_job(job_id) or {}
+
     def list_events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(

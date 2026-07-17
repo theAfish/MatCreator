@@ -169,11 +169,10 @@ class RemoteJobService:
         if job["status"] not in {"queued", "running", "resuming"}:
             raise ValueError(f"E2B job '{job_id}' cannot run commands while {job['status']}")
         result = self.e2b_adapter.run_command(job["external_id"], command, user=user)
-        self.store.record_observation(
+        self.store.merge_observation(
             job_id,
             snapshot={"provider_status": "reachable", "last_command_exit_code": result["exit_code"]},
             error=None,
-            expected_revision=job["state_revision"],
         )
         return result
 
@@ -184,11 +183,10 @@ class RemoteJobService:
             raise ValueError(f"E2B job '{job_id}' cannot receive files while {job['status']}")
         source_path = Path(source).expanduser().resolve()
         self.e2b_adapter.upload_file(job["external_id"], source_path, destination)
-        self.store.record_observation(
+        self.store.merge_observation(
             job_id,
             snapshot={"provider_status": "reachable", "last_upload": source_path.name},
             error=None,
-            expected_revision=job["state_revision"],
         )
         return {"source": str(source_path), "destination": destination}
 
