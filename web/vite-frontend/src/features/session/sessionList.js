@@ -14,6 +14,7 @@ export function createSessionListController({
   switchSession,
   deleteSession,
   downloadSessionLog,
+  sessionDisplayStatus: getSessionDisplayStatus,
 }) {
   let lastSessions = [];
 
@@ -30,11 +31,13 @@ export function createSessionListController({
     }
   }
 
-  function sessionDisplayStatus(session, owner) {
+  function defaultSessionDisplayStatus(session, owner) {
     if (activeSessionRequest(sessionRequestKey(session.id, owner))) return "running";
     const status = String(session.status || session.phase || "").toLowerCase();
     return ["running", "idle"].includes(status) ? status : "idle";
   }
+
+  const sessionDisplayStatus = getSessionDisplayStatus || defaultSessionDisplayStatus;
 
   function render(sessions) {
     lastSessions = Array.isArray(sessions) ? sessions : [];
