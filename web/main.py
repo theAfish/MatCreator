@@ -37,6 +37,7 @@ import sys
 import termios
 import threading
 import time
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import unquote
@@ -96,12 +97,17 @@ from matcreator.constants import GRAPH_AGENT_MODEL, KNOW_DO_GRAPH_DB  # noqa: E4
 from matcreator.control_plane.remote_job_monitor import RemoteJobMonitor  # noqa: E402
 from matcreator.control_plane.remote_job_service import RemoteJobService  # noqa: E402
 from matcreator.control_plane.remote_jobs import RemoteJobStore  # noqa: E402
-from matcreator.control_plane.benchmark_client import BenchmarkClient  # noqa: E402
+from matcreator.control_plane.benchmark_client import BenchmarkApiError, BenchmarkClient  # noqa: E402
 from matcreator.control_plane.evaluation_manager import EvaluationManager  # noqa: E402
 from matcreator.control_plane.evaluation_runtime import RuntimeOutcome, RuntimeSpec  # noqa: E402
 from matcreator.control_plane.evaluation_service import EvaluationService  # noqa: E402
 from matcreator.control_plane.evaluations import EvaluationStore  # noqa: E402
 from matcreator.control_plane.runs import ManagedRun, ManagedRunRegistry  # noqa: E402
+from matcreator.control_plane.session_question_generator import (  # noqa: E402
+    BuiltinLlmQuestionGeneratorPlugin,
+    CallableSessionQuestionGenerator,
+    StagedSessionQuestionService,
+)
 from matcreator.knowledge.query import _get_kg  # noqa: E402
 from matcreator.knowledge.review import run_review_pipeline  # noqa: E402
 from matcreator.ports import get_adk_port, get_local_adk_command, get_web_port, get_worker_base_port  # noqa: E402
@@ -133,6 +139,14 @@ class EvaluationQuestionDraftBody(BaseModel):
     expected_deliverables: list[str]
     rubrics: list[dict[str, Any]]
     tags: list[str] = []
+
+
+class EvaluationQuestionDraftUpdateBody(BaseModel):
+    question_yaml: str
+
+
+class EvaluationQuestionDraftRefineBody(BaseModel):
+    instruction: str = ""
 _SERVER_HOST_DATA_ROOT = Path(
     os.environ.get("MATCREATOR_HOST_DATA_ROOT", str(_SERVER_DATA_ROOT))
 ).expanduser()
@@ -339,6 +353,61 @@ def _benchmark_client() -> BenchmarkClient:
             detail="Benchmark service is not configured. Set MAT_BENCH_SERVER_URL and MAT_BENCH_TOKEN or benchmark.server_url and benchmark.token in config.yaml.",
         )
     return BenchmarkClient(server_url, token)
+
+
+_benchmark_token_registration_lock = asyncio.Lock()
+
+
+async def _benchmark_client_for_owner(owner_id: str = "") -> BenchmarkClient:
+    """Resolve a benchmark client, registering a development token when needed."""
+    config = _load_config_for_user(owner_id)
+    benchmark_config = config.get("benchmark") or {}
+    if not isinstance(benchmark_config, dict):
+        benchmark_config = {}
+    server_url = (
+        os.environ.get("MAT_BENCH_SERVER_URL", "").strip()
+        or str(benchmark_config.get("server_url") or "").strip()
+    )
+    token = (
+        os.environ.get("MAT_BENCH_TOKEN", "").strip()
+        or str(benchmark_config.get("token") or "").strip()
+    )
+    if not server_url:
+        raise HTTPException(
+            status_code=503,
+            detail="Benchmark service is not configured. Set MAT_BENCH_SERVER_URL or benchmark.server_url in config.yaml.",
+        )
+    if token:
+        return BenchmarkClient(server_url, token)
+    async with _benchmark_token_registration_lock:
+        # Another first-use request may have persisted the token while this request waited.
+        config = _load_config_for_user(owner_id)
+        benchmark_config = config.get("benchmark") or {}
+        if not isinstance(benchmark_config, dict):
+            benchmark_config = {}
+        token = (
+            os.environ.get("MAT_BENCH_TOKEN", "").strip()
+            or str(benchmark_config.get("token") or "").strip()
+        )
+        if token:
+            return BenchmarkClient(server_url, token)
+        try:
+            token = await BenchmarkClient.register_token(server_url)
+        except (BenchmarkApiError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Benchmark API token is missing and automatic development-token registration failed: "
+                    f"{exc}. Start mat-agent-bench with --allow-token-registration or configure benchmark.token."
+                ),
+            ) from exc
+        updated_benchmark = dict(benchmark_config)
+        updated_benchmark["server_url"] = server_url
+        updated_benchmark["token"] = token
+        updated_config = dict(config)
+        updated_config["benchmark"] = updated_benchmark
+        _save_config_for_user(updated_config, owner_id)
+        return BenchmarkClient(server_url, token)
 
 
 async def _run_remote_job_monitor() -> None:
@@ -2103,8 +2172,9 @@ async def list_evaluation_catalog(
     tags: list[str] = Query(default=[]),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=500),
+    user_id: str = Query(default=""),
 ) -> JSONResponse:
-    catalog = await _benchmark_client().list_questions(
+    catalog = await (await _benchmark_client_for_owner(user_id)).list_questions(
         q=q,
         capability=capability,
         task_type=task_type,
@@ -2241,7 +2311,7 @@ async def start_evaluation_campaign(campaign_id: str, user_id: str = Query(...))
         _evaluation_workspace_for_owner(user_id),
         launcher=_ManagedAdkEvaluationRuntime(user_id),
     )
-    client = _benchmark_client()
+    client = await _benchmark_client_for_owner(user_id)
     try:
         campaign = await service.start_campaign(campaign_id, client)
     except ValueError as exc:
@@ -2862,6 +2932,60 @@ def _build_evaluation_question_draft(session_log: dict[str, Any]) -> dict[str, A
     }
 
 
+def _session_question_staging_root(owner_id: str) -> Path:
+    if _MATCREATOR_MODE == "server":
+        if not owner_id:
+            raise HTTPException(status_code=400, detail="user_id is required in server mode")
+        return _user_matcreator_home(owner_id) / "evals" / "question-drafts"
+    return _MATCREATOR_HOME / "evals" / "question-drafts"
+
+
+def _legacy_session_question_staging_root(owner_id: str) -> Path:
+    return _evaluation_workspace_for_owner(owner_id) / "question-drafts"
+
+
+def _benchmark_question_bank_root() -> Path:
+    benchmark_config = load_config().get("benchmark") or {}
+    if not isinstance(benchmark_config, dict):
+        benchmark_config = {}
+    configured = (
+        os.environ.get("MAT_BENCH_QUESTION_BANK_ROOT", "").strip()
+        or str(benchmark_config.get("question_bank_root") or "").strip()
+    )
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Benchmark question-bank export is not configured. Set MAT_BENCH_QUESTION_BANK_ROOT "
+                "or benchmark.question_bank_root in config.yaml."
+            ),
+        )
+    return Path(configured).expanduser().resolve()
+
+
+def _session_question_template_path() -> Path:
+    configured = load_config().get("session_question_generator") or {}
+    if not isinstance(configured, dict):
+        configured = {}
+    override = str(configured.get("template_path") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(str(files("matcreator").joinpath("question_templates/mab_qa.json"))).resolve()
+
+
+def _session_question_generator() -> BuiltinLlmQuestionGeneratorPlugin:
+    configured = load_config().get("session_question_generator") or {}
+    if not isinstance(configured, dict):
+        configured = {}
+    plugin_name = str(configured.get("plugin") or "builtin_llm")
+    if plugin_name != "builtin_llm":
+        raise HTTPException(status_code=422, detail=f"Unknown session question generator plugin: {plugin_name}")
+    try:
+        return BuiltinLlmQuestionGeneratorPlugin.from_config(load_config())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/execution-graph/{session_id}")
 async def get_execution_graph(session_id: str) -> JSONResponse:
     """Return the execution graph (plan DAG) from session state for frontend visualization."""
@@ -2892,6 +3016,158 @@ async def create_evaluation_question_draft(
     """Create a local editable template from a session without publishing it."""
     session_log = _load_session_log_export(session_id, user_id or None)
     return JSONResponse(_build_evaluation_question_draft(session_log))
+
+
+@app.post("/api/sessions/{session_id}/evaluation-question-drafts")
+async def generate_evaluation_question_draft(
+    session_id: str,
+    user_id: str = Query(default="", description="Current user ID; required to scope server-mode sessions."),
+) -> JSONResponse:
+    """Generate a review-only staged benchmark question from bounded session evidence."""
+    session_log = _load_session_log_export(session_id, user_id or None)
+    owner_id = str(session_log.get("owner_id") or user_id)
+    if not owner_id:
+        raise HTTPException(status_code=422, detail="A session owner is required to stage a benchmark question")
+    model, _api_key, _base_url = _llm_config()
+    started_at = time.monotonic()
+    logger.info(
+        "Session question generation started: session_id=%s owner_id=%s model=%s",
+        session_id,
+        owner_id,
+        model or "unconfigured",
+    )
+    try:
+        service = StagedSessionQuestionService(
+            _session_question_staging_root(owner_id),
+            _session_question_generator(),
+            template_path=_session_question_template_path(),
+            legacy_roots=[_legacy_session_question_staging_root(owner_id)],
+        )
+        draft = await service.create(session_log)
+    except HTTPException as exc:
+        logger.warning(
+            "Session question generation rejected: session_id=%s owner_id=%s status_code=%s duration_seconds=%.2f",
+            session_id,
+            owner_id,
+            exc.status_code,
+            time.monotonic() - started_at,
+        )
+        raise
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Session question generation rejected: session_id=%s owner_id=%s error_type=%s duration_seconds=%.2f",
+            session_id,
+            owner_id,
+            type(exc).__name__,
+            time.monotonic() - started_at,
+        )
+        raise HTTPException(status_code=422, detail=f"Could not generate benchmark question draft: {exc}") from exc
+    except Exception as exc:
+        logger.exception(
+            "Session question generation failed: session_id=%s owner_id=%s error_type=%s duration_seconds=%.2f",
+            session_id,
+            owner_id,
+            type(exc).__name__,
+            time.monotonic() - started_at,
+        )
+        raise HTTPException(status_code=502, detail="Question generation provider request failed") from exc
+    logger.info(
+        "Session question generation completed: session_id=%s owner_id=%s draft_id=%s status=%s duration_seconds=%.2f",
+        session_id,
+        owner_id,
+        draft.draft_id,
+        draft.status,
+        time.monotonic() - started_at,
+    )
+    return JSONResponse(draft.as_dict(), status_code=201)
+
+
+def _staged_question_service(owner_id: str) -> StagedSessionQuestionService:
+    if not owner_id:
+        raise HTTPException(status_code=422, detail="A session owner is required to access benchmark question drafts")
+    return StagedSessionQuestionService(
+        _session_question_staging_root(owner_id),
+        legacy_roots=[_legacy_session_question_staging_root(owner_id)],
+    )
+
+
+@app.get("/api/evaluation-question-drafts")
+async def list_evaluation_question_drafts(user_id: str = Query(...)) -> JSONResponse:
+    return JSONResponse({"drafts": _staged_question_service(user_id).list()})
+
+
+@app.get("/api/evaluation-question-drafts/{draft_id}")
+async def get_evaluation_question_draft(draft_id: str, user_id: str = Query(...)) -> JSONResponse:
+    try:
+        draft = _staged_question_service(user_id).get(draft_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(draft.as_dict())
+
+
+@app.put("/api/evaluation-question-drafts/{draft_id}")
+async def update_evaluation_question_draft(
+    draft_id: str, body: EvaluationQuestionDraftUpdateBody, user_id: str = Query(...)
+) -> JSONResponse:
+    try:
+        draft = _staged_question_service(user_id).update(draft_id, body.question_yaml)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(draft.as_dict())
+
+
+@app.post("/api/evaluation-question-drafts/{draft_id}/approve")
+async def approve_evaluation_question_draft(draft_id: str, user_id: str = Query(...)) -> JSONResponse:
+    try:
+        draft = _staged_question_service(user_id).approve(draft_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(draft.as_dict())
+
+
+@app.post("/api/evaluation-question-drafts/{draft_id}/refine")
+async def refine_evaluation_question_draft(
+    draft_id: str,
+    body: EvaluationQuestionDraftRefineBody = Body(default=EvaluationQuestionDraftRefineBody()),
+    user_id: str = Query(...),
+) -> JSONResponse:
+    try:
+        service = StagedSessionQuestionService(
+            _session_question_staging_root(user_id),
+            _session_question_generator(),
+            template_path=_session_question_template_path(),
+            legacy_roots=[_legacy_session_question_staging_root(user_id)],
+        )
+        draft = await service.refine(draft_id, body.instruction)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Question refinement provider failed: draft_id=%s", draft_id)
+        raise HTTPException(status_code=502, detail="Question refinement provider request failed") from exc
+    return JSONResponse(draft.as_dict())
+
+
+@app.post("/api/evaluation-question-drafts/{draft_id}/export")
+async def export_evaluation_question_draft(draft_id: str, user_id: str = Query(...)) -> JSONResponse:
+    try:
+        draft = _staged_question_service(user_id).export(draft_id, _benchmark_question_bank_root())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not export benchmark question: {exc}") from exc
+    return JSONResponse(draft.as_dict())
 
 
 

@@ -31,6 +31,33 @@ class BenchmarkClient:
             headers.update(extra)
         return headers
 
+    @staticmethod
+    async def register_token(
+        server_url: str, *, client: httpx.AsyncClient | None = None
+    ) -> str:
+        """Request a development token from a bench server with registration enabled."""
+        base_url = server_url.rstrip("/")
+        if not base_url:
+            raise ValueError("Benchmark server URL is required")
+        if client is not None:
+            response = await client.post(f"{base_url}/token")
+        else:
+            async with httpx.AsyncClient(timeout=30) as http_client:
+                response = await http_client.post(f"{base_url}/token")
+        if not response.is_success:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = response.text
+            raise BenchmarkApiError("POST", "/token", response.status_code, str(detail or "unknown error"))
+        try:
+            token = str(response.json()["token"]).strip()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BenchmarkApiError("POST", "/token", 502, "Benchmark token response is invalid") from exc
+        if not token:
+            raise BenchmarkApiError("POST", "/token", 502, "Benchmark token response is empty")
+        return token
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         if not self.base_url:
             raise ValueError("Benchmark server URL is required")

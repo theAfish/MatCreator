@@ -53,6 +53,7 @@ const state = {
   evaluationCatalogTotal: null,
   evaluationCatalogFacets: {},
   evaluationQuestionSets: [],
+  evaluationGeneratedQuestions: [],
   activeEvaluationQuestionSetId: "",
   selectedEvaluationQuestions: new Set(),
   activeEvaluationCampaign: null,
@@ -236,6 +237,65 @@ function renderEvaluationQuestionSets() {
   deleteButton.disabled = !owned;
 }
 
+function renderEvaluationGeneratedQuestions() {
+  const list = document.getElementById("evaluation-generated-question-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.evaluationGeneratedQuestions.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No generated questions yet";
+    list.appendChild(empty);
+    return;
+  }
+  for (const draft of state.evaluationGeneratedQuestions) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "evaluation-generated-question";
+    row.title = "Browse generated question YAML";
+    const heading = document.createElement("span");
+    heading.className = "evaluation-generated-question-heading";
+    const questionId = document.createElement("strong");
+    questionId.textContent = draft.question_id || "Untitled question";
+    const status = document.createElement("span");
+    status.className = `evaluation-generated-question-status status-${draft.status}`;
+    status.textContent = draft.status.replaceAll("_", " ");
+    heading.append(questionId, status);
+    const meta = document.createElement("span");
+    meta.className = "evaluation-generated-question-meta";
+    meta.textContent = `Session ${draft.source_session_id || "unknown"} · ${draft.refinement_count || 0} refinements`;
+    row.append(heading, meta);
+    row.addEventListener("click", async () => {
+      try {
+        const response = await fetch(
+          `/api/evaluation-question-drafts/${encodeURIComponent(draft.draft_id)}?user_id=${encodeURIComponent(state.userId)}`,
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        showEvaluationQuestionDraftModal(data);
+      } catch (error) {
+        setEvaluationStatus(`Could not open generated question: ${error.message}`, true);
+      }
+    });
+    list.appendChild(row);
+  }
+}
+
+async function loadEvaluationGeneratedQuestions() {
+  if (!state.userId) return;
+  try {
+    const response = await fetch(
+      `/api/evaluation-question-drafts?user_id=${encodeURIComponent(state.userId)}`,
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    state.evaluationGeneratedQuestions = data.drafts || [];
+    renderEvaluationGeneratedQuestions();
+  } catch (error) {
+    setEvaluationStatus(`Could not load generated questions: ${error.message}`, true);
+  }
+}
+
 async function loadEvaluationQuestionSets() {
   if (!state.userId) return;
   try {
@@ -390,6 +450,7 @@ async function loadEvaluationCatalog() {
   if (taskType) params.set("task_type", taskType);
   setEvaluationStatus("Loading catalog");
   try {
+    if (state.userId) params.set("user_id", state.userId);
     const response = await fetch(`/api/evaluations/catalog?${params}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
@@ -635,6 +696,7 @@ function setApplicationMode(mode) {
     void loadEvaluationCatalog();
     void loadEvaluationCampaigns();
     void loadEvaluationQuestionSets();
+    void loadEvaluationGeneratedQuestions();
     if (!evaluationPoll) {
       evaluationPoll = setInterval(() => {
         if (state.activeEvaluationCampaign?.campaign_id && ["draft", "starting", "active", "cancelling"].includes(state.activeEvaluationCampaign.status)) {
@@ -657,6 +719,7 @@ evaluationModeBtn?.addEventListener("click", () => setApplicationMode("evaluatio
 document.getElementById("evaluation-refresh-catalog")?.addEventListener("click", () => void loadEvaluationCatalog());
 document.getElementById("evaluation-refresh-campaigns")?.addEventListener("click", () => void loadEvaluationCampaigns());
 document.getElementById("evaluation-refresh-question-sets")?.addEventListener("click", () => void loadEvaluationQuestionSets());
+document.getElementById("evaluation-refresh-generated-questions")?.addEventListener("click", () => void loadEvaluationGeneratedQuestions());
 document.getElementById("evaluation-create-start")?.addEventListener("click", () => void createAndStartEvaluation());
 document.getElementById("evaluation-question-set-select")?.addEventListener("change", (event) => loadSelectedQuestionSet(event.target.value));
 document.getElementById("evaluation-save-question-set")?.addEventListener("click", () => void saveEvaluationQuestionSet());
@@ -1222,8 +1285,8 @@ function renderSessionList(sessions) {
 
       const draftBtn = document.createElement("button");
       draftBtn.className = "session-item-draft";
-      draftBtn.textContent = "EVAL DRAFT";
-      draftBtn.title = "Create an evaluation-question draft from this session";
+      draftBtn.textContent = "GENERATE";
+      draftBtn.title = "Generate a staged benchmark question from this session";
       draftBtn.disabled = status === "running";
       draftBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1518,7 +1581,7 @@ async function downloadSessionLog(sessionId, owner = state.userId) {
   }
 }
 
-function showEvaluationQuestionDraftModal(draft) {
+function showEvaluationQuestionDraftModal(draft, actionMessage = "") {
   const existing = document.querySelector(".evaluation-draft-overlay");
   if (existing) existing.remove();
 
@@ -1535,9 +1598,9 @@ function showEvaluationQuestionDraftModal(draft) {
   const heading = document.createElement("div");
   const eyebrow = document.createElement("div");
   eyebrow.className = "eyebrow";
-  eyebrow.textContent = "Session-derived evaluation";
+  eyebrow.textContent = "Staged benchmark question";
   const title = document.createElement("h2");
-  title.textContent = draft.question.title;
+  title.textContent = draft.question.id || "Generated question";
   heading.append(eyebrow, title);
   const close = document.createElement("button");
   close.className = "ghost";
@@ -1548,43 +1611,312 @@ function showEvaluationQuestionDraftModal(draft) {
 
   const notice = document.createElement("p");
   notice.className = "evaluation-draft-notice";
-  notice.textContent = draft.publication.message;
+  const statusNotices = {
+    ready_for_review: "This draft is saved and ready for review. Approve it when the YAML is final.",
+    invalid: "This saved draft has validation issues. Edit it manually or refine it with MatCreator feedback.",
+    approved: "This draft is approved and saved. Export it to add it to the configured benchmark bank.",
+    exported: "This draft has been exported to the configured benchmark bank and is now read-only.",
+  };
+  notice.textContent = statusNotices[draft.status] || "This question draft is saved for review.";
+  const validation = document.createElement("div");
+  const isValid = ["ready_for_review", "approved", "exported"].includes(draft.status);
+  validation.className = `evaluation-draft-validation ${isValid ? "is-valid" : "is-invalid"}`;
+  validation.textContent = isValid
+    ? "Schema and executable-verifier checks passed"
+    : "Validation issues";
+  if (draft.validation_errors?.length) {
+    const errors = document.createElement("ul");
+    for (const message of draft.validation_errors) {
+      const item = document.createElement("li");
+      item.textContent = message;
+      errors.appendChild(item);
+    }
+    validation.appendChild(errors);
+  }
+  const yamlHeading = document.createElement("h3");
+  yamlHeading.textContent = "Generated question YAML";
+  const yaml = document.createElement("textarea");
+  yaml.className = "evaluation-draft-yaml";
+  yaml.textContent = draft.question_yaml || "No YAML was returned.";
+  yaml.value = draft.question_yaml || "";
+  yaml.setAttribute("aria-label", "Generated question YAML");
+  yaml.spellcheck = false;
+  const actions = document.createElement("div");
+  actions.className = "evaluation-draft-actions";
+  const instruction = document.createElement("textarea");
+  instruction.className = "evaluation-draft-instruction";
+  instruction.rows = 2;
+  instruction.maxLength = 2000;
+  instruction.placeholder = "Optional refinement instruction";
+  instruction.setAttribute("aria-label", "Optional refinement instruction");
+  instruction.disabled = draft.status === "exported";
+  const actionStatus = document.createElement("p");
+  actionStatus.className = actionMessage
+    ? "evaluation-draft-action-status is-success"
+    : "evaluation-draft-action-status";
+  actionStatus.setAttribute("role", "status");
+  actionStatus.textContent = actionMessage;
+  const buttons = [];
+  const runDraftAction = async (path, options = {}, activeButton, pendingLabel, successLabel) => {
+    actionStatus.className = "evaluation-draft-action-status";
+    actionStatus.textContent = "";
+    const originalLabel = activeButton.textContent;
+    buttons.forEach((button) => { button.disabled = true; });
+    instruction.disabled = true;
+    card.setAttribute("aria-busy", "true");
+    activeButton.textContent = pendingLabel;
+    try {
+      const response = await fetch(
+        `/api/evaluation-question-drafts/${encodeURIComponent(draft.draft_id)}${path}?user_id=${encodeURIComponent(draft.evidence?.source?.owner_id || state.userId)}`,
+        options,
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      const savedPath = data.staging_path ? `${data.staging_path}/question.yaml` : "draft storage";
+      if (state.appMode === "evaluation") void loadEvaluationGeneratedQuestions();
+      showEvaluationQuestionDraftModal(data, `${successLabel} ${savedPath}`);
+      return data;
+    } catch (error) {
+      activeButton.textContent = originalLabel;
+      buttons.forEach((button) => { button.disabled = false; });
+      save.disabled = draft.status === "exported";
+      refine.disabled = draft.status === "exported";
+      approve.disabled = draft.status === "exported";
+      exportButton.disabled = draft.status !== "approved";
+      instruction.disabled = draft.status === "exported";
+      card.removeAttribute("aria-busy");
+      actionStatus.className = "evaluation-draft-action-status is-error";
+      actionStatus.textContent = error.message || "The action failed.";
+      actionStatus.focus();
+      return null;
+    }
+  };
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "ghost";
+  save.textContent = "Save YAML";
+  save.disabled = draft.status === "exported";
+  save.addEventListener("click", () => void runDraftAction("", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question_yaml: yaml.value }),
+  }, save, "Saving...", "Saved to"));
+  actions.appendChild(save);
+  const refine = document.createElement("button");
+  refine.type = "button";
+  refine.className = "ghost";
+  refine.textContent = "Refine with feedback";
+  refine.disabled = draft.status === "exported";
+  refine.addEventListener("click", () => void (async () => {
+    try {
+      let current = draft;
+      if (yaml.value !== draft.question_yaml) {
+        current = await runDraftAction("", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question_yaml: yaml.value }),
+        }, refine, "Saving...", "Saved to");
+      }
+      if (!current) return;
+      await runDraftAction("/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: instruction.value }),
+      }, refine, "Refining...", "Refined and saved to");
+    } catch (_error) {
+      // runDraftAction renders the actionable error in the dialog.
+    }
+  })());
+  actions.appendChild(refine);
+  const approve = document.createElement("button");
+  approve.type = "button";
+  approve.className = "ghost";
+  approve.textContent = draft.status === "approved" ? "Approved" : "Approve";
+  approve.disabled = draft.status === "exported";
+  approve.title = draft.status === "invalid"
+    ? "Validate this saved YAML and show why it cannot be approved"
+    : "Approve this saved YAML";
+  approve.addEventListener("click", () => void runDraftAction(
+    "/approve", { method: "POST" }, approve, "Approving...", "Approved and saved at",
+  ));
+  actions.appendChild(approve);
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.className = "evaluation-draft-export";
+  exportButton.textContent = draft.status === "exported" ? "Exported" : "Export to benchmark bank";
+  exportButton.disabled = draft.status !== "approved";
+  exportButton.addEventListener("click", () => void runDraftAction(
+    "/export", { method: "POST" }, exportButton, "Exporting...", "Exported from",
+  ));
+  actions.appendChild(exportButton);
+  buttons.push(save, refine, approve, exportButton);
   const evidence = document.createElement("div");
   evidence.className = "evaluation-draft-evidence";
   const stepsHeading = document.createElement("h3");
-  stepsHeading.textContent = "Observable successful steps";
+  stepsHeading.textContent = "Observable session steps";
   evidence.appendChild(stepsHeading);
   const stepList = document.createElement("ol");
-  for (const step of draft.evidence.successful_steps) {
+  for (const step of draft.evidence?.steps || []) {
     const item = document.createElement("li");
-    item.textContent = `${step.action}${step.summary ? `: ${step.summary}` : ""}`;
+    item.textContent = `${step.action}${step.status ? ` [${step.status}]` : ""}${step.summary ? `: ${step.summary}` : ""}`;
     stepList.appendChild(item);
   }
   evidence.appendChild(stepList);
   const artifacts = document.createElement("p");
   artifacts.className = "evaluation-draft-artifacts";
-  artifacts.textContent = `${draft.evidence.artifacts.length} source artifact${draft.evidence.artifacts.length === 1 ? "" : "s"} available for review.`;
+  const artifactCount = draft.evidence?.artifacts?.length || 0;
+  artifacts.textContent = `${artifactCount} source artifact${artifactCount === 1 ? "" : "s"} available for review.`;
   evidence.appendChild(artifacts);
-  card.append(header, notice, evidence);
+  card.append(header, notice, validation, yamlHeading, yaml, instruction, actions, actionStatus, evidence);
   overlay.appendChild(card);
   document.body.appendChild(overlay);
   close.focus();
   overlay.addEventListener("click", (event) => { if (event.target === overlay) overlay.remove(); });
 }
 
+function showEvaluationQuestionDraftError(message) {
+  const existing = document.querySelector(".evaluation-draft-overlay");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.className = "evaluation-draft-overlay";
+  const card = document.createElement("section");
+  card.className = "evaluation-draft-card";
+  card.setAttribute("role", "alertdialog");
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", "Question generation failed");
+  const heading = document.createElement("h2");
+  heading.textContent = "Question generation failed";
+  const detail = document.createElement("p");
+  detail.className = "evaluation-draft-notice";
+  detail.textContent = message;
+  const close = document.createElement("button");
+  close.className = "ghost";
+  close.type = "button";
+  close.textContent = "Close";
+  close.addEventListener("click", () => overlay.remove());
+  card.append(heading, detail, close);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  close.focus();
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) overlay.remove(); });
+}
+
+function showEvaluationQuestionDraftGenerating() {
+  const existing = document.querySelector(".evaluation-draft-overlay");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.className = "evaluation-draft-overlay";
+  const card = document.createElement("section");
+  card.className = "evaluation-draft-card evaluation-draft-generating";
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", "Generating benchmark question");
+  card.setAttribute("aria-busy", "true");
+  const spinner = document.createElement("div");
+  spinner.className = "evaluation-draft-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+  const content = document.createElement("div");
+  const heading = document.createElement("h2");
+  heading.textContent = "Generating benchmark question";
+  const detail = document.createElement("p");
+  detail.className = "evaluation-draft-notice";
+  detail.setAttribute("role", "status");
+  detail.textContent = "Preparing session evidence and asking the configured MatCreator LLM for a reviewable draft.";
+  content.append(heading, detail);
+  card.append(spinner, content);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+}
+
 async function showEvaluationQuestionDraft(sessionId, owner = state.userId) {
   const query = owner ? `?user_id=${encodeURIComponent(owner)}` : "";
+  showEvaluationQuestionDraftGenerating();
   try {
     const response = await fetch(
-      `/api/sessions/${encodeURIComponent(sessionId)}/evaluation-question-draft${query}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/evaluation-question-drafts${query}`,
       { method: "POST" },
     );
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || `HTTP ${response.status}`);
+    }
     showEvaluationQuestionDraftModal(await response.json());
   } catch (error) {
-    console.warn("Failed to create evaluation question draft", error);
+    console.warn("Failed to generate staged benchmark question", error);
+    showEvaluationQuestionDraftError(error.message || "The server did not return a reason.");
   }
 }
+
+async function showSavedQuestionDrafts() {
+  try {
+    const response = await fetch(
+      `/api/evaluation-question-drafts?user_id=${encodeURIComponent(state.userId)}`,
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+    const overlay = document.createElement("div");
+    overlay.className = "evaluation-draft-overlay";
+    const card = document.createElement("section");
+    card.className = "evaluation-draft-card evaluation-draft-list-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-label", "Saved evaluation question drafts");
+    const header = document.createElement("header");
+    header.className = "evaluation-draft-header";
+    const heading = document.createElement("h2");
+    heading.textContent = "Saved question drafts";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "ghost";
+    close.textContent = "Close";
+    close.addEventListener("click", () => overlay.remove());
+    header.append(heading, close);
+    const list = document.createElement("div");
+    list.className = "evaluation-draft-list";
+    const drafts = payload.drafts || [];
+    if (!drafts.length) {
+      const empty = document.createElement("p");
+      empty.className = "evaluation-draft-notice";
+      empty.textContent = "No saved question drafts yet.";
+      list.appendChild(empty);
+    }
+    for (const draft of drafts) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "evaluation-draft-list-item";
+      const title = document.createElement("strong");
+      title.textContent = draft.question_id || "Untitled question";
+      const meta = document.createElement("span");
+      meta.textContent = `${draft.status} · session ${draft.source_session_id || "unknown"}`;
+      row.append(title, meta);
+      row.addEventListener("click", async () => {
+        const loaded = await fetch(
+          `/api/evaluation-question-drafts/${encodeURIComponent(draft.draft_id)}?user_id=${encodeURIComponent(state.userId)}`,
+        );
+        const data = await loaded.json().catch(() => ({}));
+        if (!loaded.ok) {
+          showEvaluationQuestionDraftError(data.detail || `HTTP ${loaded.status}`);
+          return;
+        }
+        showEvaluationQuestionDraftModal(data);
+      });
+      list.appendChild(row);
+    }
+    card.append(header, list);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    close.focus();
+    overlay.addEventListener("click", (event) => { if (event.target === overlay) overlay.remove(); });
+  } catch (error) {
+    showEvaluationQuestionDraftError(error.message || "Saved drafts could not be loaded.");
+  }
+}
+
+document.getElementById("saved-question-drafts")?.addEventListener("click", () => {
+  void showSavedQuestionDrafts();
+});
 
 document.getElementById("refresh-files").addEventListener("click", (e) => { e.stopPropagation(); refreshSessionFiles(); });
 

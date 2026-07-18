@@ -334,6 +334,14 @@
                 <button class="ghost" id="evaluation-delete-question-set" type="button" disabled>Delete</button>
               </div>
             </section>
+            <section class="evaluation-generated-questions" aria-label="Generated questions">
+              <div class="block-header">Generated questions
+                <button class="ghost" id="evaluation-refresh-generated-questions" type="button" title="Refresh generated questions">↺</button>
+              </div>
+              <div class="evaluation-generated-question-list" id="evaluation-generated-question-list">
+                <p class="empty">No generated questions loaded</p>
+              </div>
+            </section>
             <button class="evaluation-start-btn" id="evaluation-create-start" type="button">Start evaluation</button>
             <p class="evaluation-status" id="evaluation-status"></p>
             <div class="evaluation-campaign-summary" id="evaluation-campaign-summary"></div>
@@ -343,6 +351,7 @@
             <div class="block-header">Sessions
               <div class="session-header-actions">
                 <button class="ghost" id="reset-session">New Session</button>
+                <button class="ghost" id="saved-question-drafts">Drafts</button>
                 <button class="ghost" id="refresh-sessions" style="font-size:11px" title="Refresh session list">↺</button>
               </div>
             </div>
