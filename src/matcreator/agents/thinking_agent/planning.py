@@ -7,6 +7,7 @@ DAG-based execution graphs and (legacy) linear execution plans.
 from __future__ import annotations
 
 import logging
+import uuid
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -14,6 +15,7 @@ from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from ...skill import ALL_SKILLS
+from ..execution_graph_state import get_execution_graph, set_execution_graph
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +77,94 @@ class ExecutionPlan(BaseModel):
 class NodeStatus(str, Enum):
     pending = "pending"
     running = "running"
+    waiting = "waiting"
     success = "success"
     failed = "failed"
     blocked = "blocked"   # a predecessor failed; this node cannot run
+
+
+_NODE_TRANSITIONS: dict[NodeStatus, frozenset[NodeStatus]] = {
+    NodeStatus.pending: frozenset({NodeStatus.running, NodeStatus.blocked}),
+    NodeStatus.running: frozenset({NodeStatus.success, NodeStatus.failed, NodeStatus.waiting}),
+    NodeStatus.waiting: frozenset({NodeStatus.pending, NodeStatus.failed}),
+    NodeStatus.success: frozenset(),
+    NodeStatus.failed: frozenset(),
+    NodeStatus.blocked: frozenset(),
+}
+
+
+def transition_graph_node(
+    graph: dict,
+    node_id: str,
+    target: NodeStatus,
+    result: Optional[str] = None,
+) -> dict:
+    """Apply one legal graph node lifecycle transition."""
+    node = (graph.get("nodes") or {}).get(node_id)
+    if not isinstance(node, dict):
+        raise ValueError(f"Unknown graph node: {node_id}")
+    try:
+        current = NodeStatus(node.get("status", NodeStatus.pending))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported node status: {node.get('status')}") from exc
+    if target != current and target not in _NODE_TRANSITIONS[current]:
+        raise ValueError(f"Illegal graph node transition: {current.value} -> {target.value}")
+    node["status"] = target.value
+    if result is not None:
+        node["result"] = result
+    return node
+
+
+def graph_nodes_with_status(graph: dict, status: NodeStatus) -> list[str]:
+    """Return node IDs currently in a lifecycle state."""
+    return [
+        node_id
+        for node_id, node in (graph.get("nodes") or {}).items()
+        if node.get("status") == status.value
+    ]
+
+
+def ready_nodes_from_graph(graph: dict) -> list[dict]:
+    """Return pending nodes whose graph predecessors have succeeded."""
+    nodes = graph.get("nodes") or {}
+    predecessors: dict[str, set[str]] = {node_id: set() for node_id in nodes}
+    for edge in graph.get("edges") or []:
+        if len(edge) == 2:
+            predecessors.setdefault(edge[1], set()).add(edge[0])
+    return [
+        node
+        for node_id, node in nodes.items()
+        if node.get("status") == NodeStatus.pending.value
+        and all(nodes.get(parent_id, {}).get("status") == NodeStatus.success.value for parent_id in predecessors[node_id])
+    ]
+
+
+def block_graph_dependents(graph: dict, failed_node_id: str) -> list[str]:
+    """Mark pending transitive dependents as blocked and record their source."""
+    nodes = graph.get("nodes") or {}
+    successors: dict[str, list[str]] = {node_id: [] for node_id in nodes}
+    for edge in graph.get("edges") or []:
+        if len(edge) == 2:
+            successors.setdefault(edge[0], []).append(edge[1])
+    blocked: list[str] = []
+    pending = list(successors.get(failed_node_id, []))
+    while pending:
+        node_id = pending.pop(0)
+        if node_id in blocked:
+            continue
+        blocked.append(node_id)
+        pending.extend(successors.get(node_id, []))
+        node = nodes.get(node_id)
+        if isinstance(node, dict) and node.get("status") == NodeStatus.pending.value:
+            node["status"] = NodeStatus.blocked.value
+            node.setdefault("blocked_by", []).append(failed_node_id)
+    return blocked
+
+
+def is_graph_complete(graph: dict) -> bool:
+    """Return whether every graph node completed successfully."""
+    nodes = (graph.get("nodes") or {}).values()
+    return bool(nodes) and all(node.get("status") == NodeStatus.success.value for node in nodes)
 
 
 class GraphNode(BaseModel):
@@ -178,13 +265,24 @@ def validate_graph(graph: dict, tool_context: ToolContext) -> dict:
                      (predecessor must complete before successor starts)
           - 'additional_notes': optional string
     """
+    if tool_context.state.get("execution_approved", False):
+        return {
+            "status": "error",
+            "message": "Execution is already approved; hand control back to the orchestrator.",
+        }
+
     try:
         validated = ExecutionGraph(**graph)
-        tool_context.state["execution_graph"] = validated.model_dump()
+        committed_graph = validated.model_dump()
+        # Recovery records are keyed by session and node ID on disk.  A fresh
+        # graph may legitimately reuse a node ID from an earlier failed plan,
+        # so give every committed graph its own recovery namespace identity.
+        committed_graph["graph_id"] = uuid.uuid4().hex
+        set_execution_graph(tool_context.state, committed_graph)
         tool_context.state["plan_exec_id"] = None  # force new execution namespace
         return {
             "status": "ok",
-            "execution_graph": validated.model_dump(),
+            "execution_graph": committed_graph,
             "message": f"Graph validated: {len(validated.nodes)} nodes, {len(validated.edges)} edges.",
         }
     except ValidationError as exc:
@@ -211,7 +309,7 @@ def get_ready_nodes(tool_context: ToolContext) -> dict:
     Call at the start of each execution batch. Dispatch ALL returned nodes in a
     single response turn to enable concurrent parallel execution.
     """
-    graph = tool_context.state.get("execution_graph") or {}
+    graph = get_execution_graph(tool_context.state) or {}
     nodes = graph.get("nodes") or {}
     edges = graph.get("edges") or []
 
@@ -256,16 +354,16 @@ def set_node_status(
 
     Args:
         node_id: The node's ID string in the execution graph.
-        status:  New status: 'success', 'failed', 'running', 'blocked', or 'cancelled'.
+        status:  New status: 'success', 'failed', 'running', 'waiting', 'blocked', or 'cancelled'.
         result:  Optional concise summary (success) or failure reason.
     """
-    graph = tool_context.state.get("execution_graph")
+    graph = get_execution_graph(tool_context.state)
     if not graph or node_id not in (graph.get("nodes") or {}):
         return {"status": "error", "message": f"Node '{node_id}' not found in execution_graph."}
     graph["nodes"][node_id]["status"] = status
     if result is not None:
         graph["nodes"][node_id]["result"] = result
-    tool_context.state["execution_graph"] = graph
+    set_execution_graph(tool_context.state, graph)
     logger.debug("[set_node_status] %s → %s", node_id, status)
     return {"status": "ok", "node_id": node_id, "new_status": status}
 
@@ -283,7 +381,7 @@ def mark_dependents_blocked(failed_node_id: str, tool_context: ToolContext) -> d
     Args:
         failed_node_id: The node_id of the node that failed.
     """
-    graph = tool_context.state.get("execution_graph") or {}
+    graph = get_execution_graph(tool_context.state) or {}
     nodes = graph.get("nodes") or {}
     edges = graph.get("edges") or []
 
@@ -304,7 +402,7 @@ def mark_dependents_blocked(failed_node_id: str, tool_context: ToolContext) -> d
     for nid in blocked:
         if nodes.get(nid, {}).get("status") == "pending":
             nodes[nid]["status"] = "blocked"
-    tool_context.state["execution_graph"] = graph
+    set_execution_graph(tool_context.state, graph)
     return {
         "status": "ok",
         "blocked_count": len(blocked),

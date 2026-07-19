@@ -27,6 +27,7 @@ from .step_executor import (
 )
 from .recovery import finish_node_attempt, heartbeat_node_attempt, start_node_attempt
 from ..graph_logger import AgentGraphLogger
+from ..execution_graph_state import get_execution_graph, set_execution_graph
 from ..session_log import (
     append_session_log_entry,
     collect_artifact_paths,
@@ -317,6 +318,35 @@ async def _heartbeat_recovery_attempt(attempt: dict) -> None:
         pass
 
 
+async def _cleanup_step_runner(
+    runner: Runner,
+    tasks: tuple[asyncio.Task, ...],
+) -> None:
+    """Wait for executor tasks to finish, then close their runner."""
+    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        await asyncio.wait_for(runner.close(), timeout=5.0)
+    except Exception:
+        pass
+
+
+def _log_cancelled_cleanup_result(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.exception("[CANCEL] step runner cleanup failed")
+
+
+def _schedule_step_runner_cleanup(
+    runner: Runner,
+    tasks: tuple[asyncio.Task, ...],
+) -> None:
+    cleanup_task = asyncio.create_task(_cleanup_step_runner(runner, tasks))
+    cleanup_task.add_done_callback(_log_cancelled_cleanup_result)
+
+
 async def _stream_step_events(
     runner: Runner,
     session,
@@ -527,9 +557,10 @@ async def run_step_executor(
         action=action,
         suggested_skills=suggested_skills,
         prior_context=prior_context,
+        graph_id=(get_execution_graph(tool_context.state) or {}).get("graph_id"),
     )
     if node_id:
-        graph_state = tool_context.state.get("execution_graph") or {}
+        graph_state = get_execution_graph(tool_context.state) or {}
         graph_nodes = graph_state.get("nodes") or {}
         if node_id in graph_nodes:
             graph_nodes[node_id]["status"] = "running"
@@ -537,7 +568,7 @@ async def run_step_executor(
                 "status": "running",
                 "started_at": _now(),
             }
-            tool_context.state["execution_graph"] = graph_state
+            set_execution_graph(tool_context.state, graph_state)
 
     # Pre-step cancellation check — abort before creating the runner if flagged
     if is_cancellation_requested(session_id) or is_step_cancellation_requested(session_id, step_number):
@@ -586,6 +617,7 @@ async def run_step_executor(
         if not k.startswith("_adk") and not is_session_log_state_key(k)
     }
     state_dict["workspace_dir"] = str(step_workspace)
+    state_dict["step_number"] = step_number
     if output_dir is not None:
         state_dict["output_dir"] = str(output_dir)
         state_dict["session_output_dir"] = str(output_dir)
@@ -613,6 +645,7 @@ async def run_step_executor(
 
     cancelled = False
     timed_out = False
+    runner_error: Optional[Exception] = None
     step_state_delta: dict = {}
     plot_paths: list[str] = []
     artifact_paths: list[str] = []
@@ -625,16 +658,18 @@ async def run_step_executor(
         timed_out = True
     except asyncio.CancelledError:
         cancelled = True
+    except Exception as exc:
+        runner_error = exc
     finally:
         if not watcher.done():
             watcher.cancel()
         if not recovery_heartbeat.done():
             recovery_heartbeat.cancel()
-        await asyncio.gather(inner_task, watcher, recovery_heartbeat, return_exceptions=True)
-        try:
-            await asyncio.wait_for(runner.close(), timeout=5.0)
-        except Exception:
-            pass
+        cleanup_tasks = (inner_task, watcher, recovery_heartbeat)
+        if cancelled:
+            _schedule_step_runner_cleanup(runner, cleanup_tasks)
+        else:
+            await _cleanup_step_runner(runner, cleanup_tasks)
 
     if timed_out:
         logger.warning(
@@ -694,6 +729,40 @@ async def run_step_executor(
         return {
             "status": "cancelled",
             "message": f"Step {step_number} cancelled ({reason}).",
+        }
+
+    if runner_error is not None:
+        error_message = f"Step executor failed unexpectedly: {runner_error}"
+        logger.error(
+            "[step_executor_runner] node %s failed unexpectedly: %s",
+            effective_id,
+            runner_error,
+            exc_info=(type(runner_error), runner_error, runner_error.__traceback__),
+        )
+        await asyncio.to_thread(
+            graph.log_node_complete,
+            step_id,
+            "failed",
+            summary=error_message,
+        )
+        append_session_log_entry(tool_context, {
+            "kind": "step_complete",
+            **step_input_log,
+            "status": "failed",
+            "message": error_message,
+            "events": event_log,
+        }, artifacts=artifact_paths)
+        await asyncio.to_thread(
+            finish_node_attempt,
+            recovery_attempt,
+            status="failed",
+            artifacts=artifact_paths,
+            message=error_message,
+        )
+        clear_step_cancellation(session_id, step_number)
+        return {
+            "status": "error",
+            "message": error_message,
         }
 
     if step_state_delta:

@@ -3,7 +3,7 @@ name: dft-calculation
 description: Concept skill for Density Functional Theory (DFT) calculations. Describes what DFT is, when to use it, and which tool skills to invoke for DFT jobs. Use this to understand the DFT landscape before selecting a specific code (VASP or ABACUS).
 metadata:
   dependent_skills:
-    - vasp
+    - vasp-pymatgen
     - abacus
   tags:
     - DFT
@@ -15,7 +15,7 @@ metadata:
 
 # DFT Calculation
 
-Density Functional Theory (DFT) is an ab initio quantum-mechanical method that computes the electronic structure of materials from first principles. It is the standard approach for generating accurate reference energies, forces, and stresses used to label training data for machine learning force fields (MLFFs), as well as for validating candidate structures in materials design workflows.
+Density Functional Theory (DFT) is an ab initio quantum-mechanical method that computes the electronic structure of materials from first principles. It is the standard approach for generating accurate reference energies, forces, and stresses used to label training data for machine-learned force fields (MLFFs), as well as for validating candidate structures in materials design workflows.
 
 ## When to Use DFT
 
@@ -28,7 +28,7 @@ Density Functional Theory (DFT) is an ab initio quantum-mechanical method that c
 
 | Parameter | Typical Default | Notes |
 |-----------|-----------------|-------|
-| `kspacing` | 0.14 Å⁻¹ | Controls k-point density; smaller = more accurate but slower |
+| `kspacing` | 0.2 Å⁻¹ | Controls k-point density; smaller = more accurate but slower |
 | Functional | PBE (GGA) | Use PBE+U or hybrid for correlated/magnetic systems |
 | Pseudopotentials | PAW / ONCV | Code-dependent; verify compatibility with the element set |
 | Energy cutoff | Code-dependent | Set per pseudopotential recommendation |
@@ -38,6 +38,6 @@ Density Functional Theory (DFT) is an ab initio quantum-mechanical method that c
 | Skill | Code | Best For |
 |-------|------|---------|
 | `abacus` | ABACUS | Open-source; preferred for Chinese HPC clusters and PFD workflows |
-| `vasp` | VASP | Commercial; widely used; load `vasp` skill for VASP-specific instructions |
+| `vasp-pymatgen` | VASP | Commercial; widely used; load `vasp-pymatgen` skill for VASP-specific instructions |
 
 Load the appropriate tool skill (e.g., `load_skill("abacus")`) for step-by-step instructions on preparing inputs, submitting jobs, and collecting results.
