@@ -28,6 +28,34 @@ def test_graph_sets_persistent_knowledge_frequencies(monkeypatch, tmp_path) -> N
     assert start_agent.os.environ["MATCREATOR_REVIEW_FREQUENCY"] == "25"
 
 
+def test_graph_clear_memory_calls_maintenance(monkeypatch) -> None:
+    from matcreator import skill
+
+    monkeypatch.setattr(
+        skill,
+        "clear_skill_graph_memory",
+        lambda **_kwargs: {"message": "Cleared 3 memory node(s).", "backup_path": None},
+    )
+    result = CliRunner().invoke(start_agent.main, ["graph", "clear-memory", "--yes"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "Cleared 3 memory node(s)."
+
+
+def test_graph_reset_calls_maintenance(monkeypatch) -> None:
+    from matcreator import skill
+
+    monkeypatch.setattr(
+        skill,
+        "reset_skill_graph",
+        lambda **_kwargs: {"message": "Reset the skill graph.", "backup_path": None},
+    )
+    result = CliRunner().invoke(start_agent.main, ["graph", "reset", "--yes"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "Reset the skill graph."
+
+
 def test_graph_stats_uses_matcreator_kdg_db(monkeypatch) -> None:
     calls: list[tuple[list[str], dict[str, str]]] = []
 

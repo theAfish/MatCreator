@@ -9,7 +9,9 @@ the guide system unchanged.
 
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from mimetypes import guess_type
 
 from google.adk.skills import load_skill_from_dir
@@ -540,4 +542,86 @@ def refresh_skills() -> dict:
         "skills": [s.name for s in new_skills],
         "count": len(new_skills),
         "message": f"Refreshed {len(new_skills)} skills; seeded {seed_result['seeded']} nodes into knowledge graph.",
+    }
+
+
+def _backup_skill_graph(graph) -> Path:
+    """Create and return a transactionally consistent SQLite graph backup."""
+    source_path = Path(graph.path)
+    if not source_path.exists():
+        raise RuntimeError(f"Cannot back up missing skill graph database: {source_path}")
+    backup_dir = source_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup_path = backup_dir / f"{source_path.stem}-{timestamp}{source_path.suffix or '.db'}"
+    try:
+        with sqlite3.connect(source_path) as source, sqlite3.connect(backup_path) as target:
+            source.backup(target)
+    except (OSError, sqlite3.Error) as exc:
+        backup_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to back up skill graph: {exc}") from exc
+    return backup_path
+
+
+def clear_skill_graph_memory(*, create_backup: bool = True) -> dict:
+    """Delete every memory node while leaving durable skill graph nodes intact."""
+    from know_do_graph import EntryType
+    from .knowledge.kdg_memory import iter_entries
+    from .knowledge.query import _get_kg
+
+    graph = _get_kg()
+    backup_path = _backup_skill_graph(graph) if create_backup else None
+    memory_ids = [
+        entry.id
+        for entry in iter_entries(graph)
+        if entry.entry_type == EntryType.memory
+    ]
+    deleted = sum(int(bool(graph.delete(entry_id))) for entry_id in memory_ids)
+    graph.refresh()
+    if deleted != len(memory_ids):
+        raise RuntimeError(
+            f"Memory clear stopped after deleting {deleted}/{len(memory_ids)} nodes; "
+            "one or more memory nodes could not be removed."
+        )
+    return {
+        "status": "ok",
+        "deleted": deleted,
+        "failed": 0,
+        "backup_path": str(backup_path) if backup_path else None,
+        "message": f"Cleared {deleted} memory node(s).",
+    }
+
+
+def reset_skill_graph(*, create_backup: bool = True) -> dict:
+    """Rebuild the graph from currently installed built-in and custom skills.
+
+    Skill files are the source of truth. All graph nodes are removed first,
+    then active built-in, official, user-global, and workspace skills (plus
+    bundled guides and declared dependency topology) are freshly seeded.
+    """
+    from .knowledge.kdg_memory import iter_entries
+    from .knowledge.query import _get_kg
+
+    graph = _get_kg()
+    backup_path = _backup_skill_graph(graph) if create_backup else None
+    entry_ids = [entry.id for entry in iter_entries(graph)]
+    deleted = sum(int(bool(graph.delete(entry_id))) for entry_id in entry_ids)
+    if deleted != len(entry_ids):
+        graph.refresh()
+        raise RuntimeError(
+            f"Graph reset stopped after deleting {deleted}/{len(entry_ids)} nodes; "
+            "one or more nodes could not be removed."
+        )
+
+    graph.refresh()
+    refresh_result = refresh_skills()
+    return {
+        "status": "ok",
+        "deleted": deleted,
+        "skills": refresh_result["count"],
+        "backup_path": str(backup_path) if backup_path else None,
+        "message": (
+            f"Reset the skill graph: removed {deleted} node(s) and restored "
+            f"{refresh_result['count']} installed skill(s)."
+        ),
     }
