@@ -64,7 +64,7 @@ def test_frontend_has_no_browser_global_send_lock() -> None:
     assert "setSendingState" not in content
 
 
-def test_existing_session_conflict_does_not_block_run_submission() -> None:
+def test_session_creation_does_not_start_knowledge_review() -> None:
     content = _main_js()
     create_session = content[
         content.index("async function createSession("):
@@ -73,7 +73,7 @@ def test_existing_session_conflict_does_not_block_run_submission() -> None:
 
     assert "resp.status === 409 ? await fetch(url) : null" in create_session
     assert "if (!existingResp?.ok)" in create_session
-    assert "if (resp.status !== 409) await startKnowledgeReview(sessionId);" in create_session
+    assert "startKnowledgeReview" not in create_session
 
 
 def test_sse_request_uses_captured_session_context() -> None:

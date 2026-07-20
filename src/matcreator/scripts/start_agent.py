@@ -15,6 +15,8 @@ Knowledge Graph Commands (matcreator graph ...):
     stats         Show graph-wide statistics (nodes, edges).
     neighbors     Show graph neighbors for a given entry ID.
     export        Export graph entries.
+    clear-memory  Delete memory nodes without changing skill nodes.
+    reset         Rebuild the graph from installed built-in and custom skills.
 
 Knowledge Management Commands (matcreator knowledge ...):
     query         Search the knowledge graph for nodes matching a query string.
@@ -214,7 +216,6 @@ def _setup_workspace(workspace: str | None) -> Path:
     return ws_root
 
 
-
 def _run_with_env(cmd: list[str], env: dict[str, str]) -> None:
     click.echo("Starting: " + " ".join(cmd))
     try:
@@ -300,9 +301,37 @@ def api_server(host, port, workspace, log_level, reload_agents, verbose, reload)
     )
 
 
-@main.group("graph", context_settings={"ignore_unknown_options": True})
-def graph_group():
+@main.group(
+    "graph",
+    context_settings={"ignore_unknown_options": True},
+    invoke_without_command=True,
+)
+@click.option(
+    "--memorize-frequency", "--memorize_frequency", "memorize_frequency",
+    type=click.IntRange(min=0), default=None, metavar="N",
+    help="Persist automatic memorization frequency; 0 disables it.",
+)
+@click.option(
+    "--review-frequency", "--review_frequency", "review_frequency",
+    type=click.IntRange(min=0), default=None, metavar="N",
+    help="Persist automatic review frequency; 0 disables it.",
+)
+@click.pass_context
+def graph_group(ctx: click.Context, memorize_frequency, review_frequency):
     """Run Know-Do Graph inspection commands against MatCreator's active database."""
+    from matcreator.config import set_config_value
+
+    changed = False
+    if memorize_frequency is not None:
+        set_config_value("knowledge.memorization_frequency", str(memorize_frequency))
+        click.echo(f"Set MATCREATOR_MEMORIZATION_FREQUENCY={memorize_frequency}")
+        changed = True
+    if review_frequency is not None:
+        set_config_value("knowledge.review_frequency", str(review_frequency))
+        click.echo(f"Set MATCREATOR_REVIEW_FREQUENCY={review_frequency}")
+        changed = True
+    if ctx.invoked_subcommand is None and not changed:
+        click.echo(ctx.get_help())
 
 
 @graph_group.command(
@@ -352,6 +381,45 @@ def graph_export(ctx: click.Context) -> None:
     env = _matcreator_kdg_env()
     cmd = [_resolve_kdg_cli(), "graph", "export", *ctx.args]
     _run_with_env(cmd, env)
+
+
+@graph_group.command("clear-memory")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option("--no-backup", is_flag=True, help="Do not back up the graph before clearing memory.")
+def graph_clear_memory(yes: bool, no_backup: bool) -> None:
+    """Delete all memory nodes while preserving the rest of the skill graph."""
+    if not yes:
+        click.confirm("Delete all memory nodes from the skill graph?", abort=True)
+    from matcreator.skill import clear_skill_graph_memory
+
+    try:
+        result = clear_skill_graph_memory(create_backup=not no_backup)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if result.get("backup_path"):
+        click.echo(f"Backup: {result['backup_path']}")
+    click.echo(result["message"])
+
+
+@graph_group.command("reset")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option("--no-backup", is_flag=True, help="Do not back up the graph before resetting it.")
+def graph_reset(yes: bool, no_backup: bool) -> None:
+    """Rebuild the graph from installed built-in and custom skill files."""
+    if not yes:
+        click.confirm(
+            "Remove learned graph data and rebuild from installed skills?",
+            abort=True,
+        )
+    from matcreator.skill import reset_skill_graph
+
+    try:
+        result = reset_skill_graph(create_backup=not no_backup)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if result.get("backup_path"):
+        click.echo(f"Backup: {result['backup_path']}")
+    click.echo(result["message"])
 
 
 # ---------------------------------------------------------------------------

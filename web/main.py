@@ -811,13 +811,16 @@ def _load_skill_graph_payload(*, limit: int = 400) -> dict:
             metadata_payload = _json_ready(metadata)
             skill_name = entry.title if "matcreator-skill" in entry.tags else None
             skill_dir = skill_dirs.get(skill_name) if skill_name else None
-            if (
+            virtual = bool(metadata.custom.get("virtual")) or bool(
                 skill_name
                 and "matcreator-guide" not in entry.tags
                 and skill_dir is None
-            ):
-                continue
-            enabled = skill_name not in disabled_skills if skill_name else True
+            )
+            enabled = (
+                skill_name not in disabled_skills and not virtual
+                if skill_name
+                else not virtual
+            )
             skill_path = str(skill_dir.resolve()) if skill_dir else None
             source = get_skill_source(skill_name) if skill_name else None
             removable = bool(
@@ -843,14 +846,15 @@ def _load_skill_graph_payload(*, limit: int = 400) -> dict:
                     "removable": removable,
                     "remove_requires_confirmation": bool(skill_name and source and source.managed),
                     "enabled": enabled,
+                    "virtual": virtual,
                     "entry_type": entry_type,
-                    "content": entry.content,
-                    "content_preview": _entry_preview(entry.content),
+                    "content": "" if virtual else entry.content,
+                    "content_preview": "" if virtual else _entry_preview(entry.content),
                     "tags": entry.tags,
                     "aliases": entry.aliases,
-                    "internal_refs": entry.internal_refs,
-                    "scripts": _json_ready(entry.scripts),
-                    "assets": _json_ready(entry.assets),
+                    "internal_refs": [] if virtual else entry.internal_refs,
+                    "scripts": [] if virtual else _json_ready(entry.scripts),
+                    "assets": [] if virtual else _json_ready(entry.assets),
                     "metadata": metadata_payload,
                     "verification_status": _entry_value(metadata.verification_status),
                     "refinement_status": _entry_value(metadata.refinement_status),
@@ -2223,6 +2227,13 @@ async def _on_startup() -> None:
     users_db.init_db()
     if _MATCREATOR_MODE != "server":
         users_db.migrate_legacy_adk_sessions(SESSION_DB_PATH, APP_NAME)
+    # Reconcile repository-managed skills before the graph UI can read stale
+    # nodes or edges.  Agent initialization also seeds the graph, but it may
+    # happen later or in a different worker process than the web frontend.
+    try:
+        await asyncio.to_thread(refresh_skills)
+    except Exception:
+        logger.exception("Failed to reconcile skill graph during web startup")
     if _MATCREATOR_MODE == "server" and _WORKER_IDLE_TIMEOUT_SECONDS > 0:
         asyncio.create_task(_idle_worker_reaper())
     _remote_job_monitor_task = asyncio.create_task(_run_remote_job_monitor())
