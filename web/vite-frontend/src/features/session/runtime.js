@@ -100,8 +100,29 @@ export function createSessionRuntime({
   }
 
   function attachStepNodes(timeline, pendingStepNodes) {
-    for (const item of timeline) {
-      if (item.type !== "function_call" || !isExecutorLauncherTool(item.name)) continue;
+    const launcherCalls = timeline.filter((item) => item.type === "function_call" && isExecutorLauncherTool(item.name));
+    if (!launcherCalls.length) return timeline;
+
+    // A resumed session may contain several parallel run_node_executor calls
+    // in one assistant event. Match their persisted step cards by node ID
+    // first; consuming them one-at-a-time made the remaining cards fall back
+    // to the chat root when the session was switched mid-run.
+    for (const item of launcherCalls) {
+      const requestedNodeId = item.args?.node_id;
+      const matchIndex = pendingStepNodes.findIndex((node) =>
+        requestedNodeId && (node.input?.node_id === requestedNodeId || node.id?.endsWith(`__node_${requestedNodeId}`)),
+      );
+      if (matchIndex >= 0) {
+        const [node] = pendingStepNodes.splice(matchIndex, 1);
+        item.stepNodes = [node];
+      }
+    }
+
+    // Older runs and flash-step calls do not always carry a stable node ID.
+    // Keep their cards inside an executor call bubble using chronological
+    // fallback, rather than appending standalone agent-message cards.
+    for (const item of launcherCalls) {
+      if (item.stepNodes?.length) continue;
       const nextStep = pendingStepNodes.shift();
       if (nextStep) item.stepNodes = [nextStep];
     }
@@ -177,7 +198,23 @@ export function createSessionRuntime({
       const timeline = attachStepNodes(eventToTimelineParts(event, responsesById, pairedResponseIds), pendingStepNodes);
       if (timeline.length) lastAgentTimeline = addAgentTimelineMessage(timeline, shownPlotPaths, messageIndex++);
     }
-    pendingStepNodes.forEach((node) => stepExecutionFeed.appendStatic(node));
+    // Preserve the assistant-message containment even if an older/incomplete
+    // persisted event stream cannot be matched to a specific executor call.
+    // This is particularly important while reconnecting after a session
+    // switch: standalone cards become visual siblings of the chat bubble.
+    if (pendingStepNodes.length) {
+      // A session can be switched to after the backend has recorded its user
+      // turn and graph nodes, but before it has persisted the assistant's
+      // executor function-call event. Provide that in-flight turn with a real
+      // bubble instead of rendering the recovered cards as chat-root siblings.
+      if (!lastAgentTimeline) {
+        lastAgentTimeline = addAgentTimelineMessage([], shownPlotPaths, messageIndex++);
+      }
+      const fallbackHost = document.createElement("div");
+      fallbackHost.className = "step-feed-inline-region";
+      lastAgentTimeline.appendChild(fallbackHost);
+      pendingStepNodes.forEach((node) => stepExecutionFeed.appendStatic(node, fallbackHost));
+    }
     if (awaitingPlanApproval && lastAgentTimeline) addPlanApprovalActions(lastAgentTimeline);
   }
 
