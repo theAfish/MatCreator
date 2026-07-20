@@ -2716,7 +2716,6 @@ async function createSession() {
       }
     }
     state.sessionReady = true;
-    if (resp.status !== 409) await startKnowledgeReview(sessionId);
     await loadSessions();
   } catch (err) {
     console.error("Failed to create session:", err);

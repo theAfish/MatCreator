@@ -214,7 +214,6 @@ def _setup_workspace(workspace: str | None) -> Path:
     return ws_root
 
 
-
 def _run_with_env(cmd: list[str], env: dict[str, str]) -> None:
     click.echo("Starting: " + " ".join(cmd))
     try:
@@ -300,9 +299,37 @@ def api_server(host, port, workspace, log_level, reload_agents, verbose, reload)
     )
 
 
-@main.group("graph", context_settings={"ignore_unknown_options": True})
-def graph_group():
+@main.group(
+    "graph",
+    context_settings={"ignore_unknown_options": True},
+    invoke_without_command=True,
+)
+@click.option(
+    "--memorize-frequency", "--memorize_frequency", "memorize_frequency",
+    type=click.IntRange(min=0), default=None, metavar="N",
+    help="Persist automatic memorization frequency; 0 disables it.",
+)
+@click.option(
+    "--review-frequency", "--review_frequency", "review_frequency",
+    type=click.IntRange(min=0), default=None, metavar="N",
+    help="Persist automatic review frequency; 0 disables it.",
+)
+@click.pass_context
+def graph_group(ctx: click.Context, memorize_frequency, review_frequency):
     """Run Know-Do Graph inspection commands against MatCreator's active database."""
+    from matcreator.config import set_config_value
+
+    changed = False
+    if memorize_frequency is not None:
+        set_config_value("knowledge.memorization_frequency", str(memorize_frequency))
+        click.echo(f"Set MATCREATOR_MEMORIZATION_FREQUENCY={memorize_frequency}")
+        changed = True
+    if review_frequency is not None:
+        set_config_value("knowledge.review_frequency", str(review_frequency))
+        click.echo(f"Set MATCREATOR_REVIEW_FREQUENCY={review_frequency}")
+        changed = True
+    if ctx.invoked_subcommand is None and not changed:
+        click.echo(ctx.get_help())
 
 
 @graph_group.command(

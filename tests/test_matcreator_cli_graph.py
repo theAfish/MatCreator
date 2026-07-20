@@ -5,6 +5,29 @@ from click.testing import CliRunner
 from matcreator.scripts import start_agent
 
 
+def test_graph_sets_persistent_knowledge_frequencies(monkeypatch, tmp_path) -> None:
+    from matcreator import config
+
+    monkeypatch.setattr(config, "_CONFIG_PATH", tmp_path / "config.yaml")
+
+    result = CliRunner().invoke(
+        start_agent.main,
+        ["graph", "--memorize_frequency", "0", "--review-frequency", "25"],
+    )
+
+    assert result.exit_code == 0
+    assert "MATCREATOR_MEMORIZATION_FREQUENCY=0" in result.output
+    assert "MATCREATOR_REVIEW_FREQUENCY=25" in result.output
+    assert config.get_config_value("knowledge.memorization_frequency") == "0"
+    assert config.get_config_value("knowledge.review_frequency") == "25"
+
+    monkeypatch.delenv("MATCREATOR_MEMORIZATION_FREQUENCY", raising=False)
+    monkeypatch.delenv("MATCREATOR_REVIEW_FREQUENCY", raising=False)
+    config.apply_config_env_overrides(pre_env=frozenset())
+    assert start_agent.os.environ["MATCREATOR_MEMORIZATION_FREQUENCY"] == "0"
+    assert start_agent.os.environ["MATCREATOR_REVIEW_FREQUENCY"] == "25"
+
+
 def test_graph_stats_uses_matcreator_kdg_db(monkeypatch) -> None:
     calls: list[tuple[list[str], dict[str, str]]] = []
 
