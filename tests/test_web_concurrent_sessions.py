@@ -109,6 +109,23 @@ def test_running_session_switch_discovers_and_reconnects_managed_run() -> None:
     assert "after=${request.lastSequence}" in main
 
 
+def test_managed_run_reconnect_retries_and_refreshes_persisted_state() -> None:
+    runtime = _runtime_js()
+
+    assert "const MANAGED_RUN_RETRY_INITIAL_DELAY_MS = 500;" in runtime
+    assert "function scheduleManagedRunRefresh(request" in runtime
+    assert "await loadSession(request.sessionId, request.owner);" in runtime
+    assert "async function managedRunStillActive(request)" in runtime
+    assert 'fetch(`/api/runs/${encodeURIComponent(request.runId)}`)' in runtime
+    assert "async function waitForManagedRunRetry(request)" in runtime
+    assert "while (shouldRetry && isCurrentManagedRunRequest(request)" in runtime
+    assert "request.lastSequence = event.sequence || request.lastSequence;" in runtime
+    assert "scheduleManagedRunRefresh(request);" in runtime
+    assert "if (event.type === \"terminal\")" in runtime
+    assert "if (!await managedRunStillActive(request) || !await waitForManagedRunRetry(request))" in runtime
+    assert "if (isCurrentManagedRunRequest(request)) {\n        releaseSessionRequest(request);" in runtime
+
+
 def test_stop_request_identifies_the_active_session_owner() -> None:
     content = _message_stream_js()
     stop_message = content[
