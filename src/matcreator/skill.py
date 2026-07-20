@@ -265,7 +265,7 @@ def seed_skills_to_graph() -> dict:
         SkillLevel,
         VerificationStatus,
     )
-    from .knowledge.kdg_memory import connect_once, upsert_entry
+    from .knowledge.kdg_memory import connect_once, iter_entries, upsert_entry
     from .knowledge.query import _get_kg
     from .guide import ALL_GUIDES
 
@@ -273,6 +273,7 @@ def seed_skills_to_graph() -> dict:
     seeded = 0
     attachments_seeded = 0
     skill_node_ids: dict[str, str] = {}
+    active_skill_names = {skill.name for skill in ALL_SKILLS}
     skill_dirs = _skill_dir_map()
 
     for skill in ALL_SKILLS:
@@ -372,7 +373,14 @@ def seed_skills_to_graph() -> dict:
             for tag in frontmatter_metadata.get("tags", [])
             if str(tag).strip()
         ]
-        tags = list(dict.fromkeys(["matcreator-skill", "managed", *extra_tags]))
+        source = get_skill_source(skill.name)
+        source_name = source.name if source else "unknown"
+        tags = list(dict.fromkeys([
+            "matcreator-skill",
+            "managed",
+            f"skill-source:{source_name}",
+            *[tag for tag in extra_tags if tag != "virtual"],
+        ]))
         node, created = upsert_entry(
             kg,
             title=skill.name,
@@ -387,13 +395,43 @@ def seed_skills_to_graph() -> dict:
                 refinement_status=RefinementStatus.validated,
                 verification_status=VerificationStatus.peer_reviewed,
                 skill_level=skill_level,
-                custom={"managed_by": "matcreator", "kind": "skill"},
+                custom={
+                    "managed_by": "matcreator",
+                    "kind": "skill",
+                    "skill_source": source_name,
+                    "virtual": False,
+                    "virtual_reason": None,
+                },
             ),
         )
+        normalized_tags = [
+            tag
+            for tag in node.tags
+            if tag != "virtual" and not tag.startswith("skill-source:")
+        ]
+        normalized_tags.append(f"skill-source:{source_name}")
+        if normalized_tags != node.tags:
+            node = kg.update(
+                node.id,
+                tags=normalized_tags,
+            )
         skill_node_ids[skill.name] = node.id
         seeded += int(created)
         attachments_seeded += len(internal_refs) + len(assets)
 
+    # Repository-managed nodes mirror the installed skill set. Remove stale
+    # real nodes here; unresolved dependency targets are recreated below as
+    # empty virtual placeholders so broken topology remains visible.
+    removed = 0
+    for entry in list(iter_entries(kg)):
+        if (
+            "matcreator-skill" not in entry.tags
+            or "matcreator-guide" in entry.tags
+            or entry.title in active_skill_names
+        ):
+            continue
+        if "managed" in entry.tags or entry.metadata.custom.get("virtual"):
+            removed += int(kg.delete(entry.id))
     for guide in ALL_GUIDES:
         _, created = upsert_entry(
             kg,
@@ -414,6 +452,7 @@ def seed_skills_to_graph() -> dict:
     # Create edges from dependent_skills metadata. For L3/L4 nodes this field
     # means "attached parent skills" so progressive retrieval can scope them.
     edges_created = 0
+    virtualized = 0
     for skill in ALL_SKILLS:
         metadata = skill.frontmatter.metadata or {}
         deps = metadata.get("dependent_skills", [])
@@ -425,8 +464,39 @@ def seed_skills_to_graph() -> dict:
         elif entry_type_value == "constraint" or skill_level_value == "L4":
             relation = EdgeRelation.constraint_on
         src_id = skill_node_ids.get(skill.name)
-        for dep_name in deps:
+        for declared_dep in deps:
+            dep_name = str(declared_dep).strip().rstrip("/")
+            # Frontmatter may use a repository-relative path such as
+            # ``concepts/dft-calculation`` while ADK registers the skill by
+            # its SKILL.md name/basename. Prefer an exact name, then resolve
+            # a path-style reference to its installed basename.
+            if dep_name not in active_skill_names and "/" in dep_name:
+                basename = dep_name.rsplit("/", 1)[-1]
+                if basename in active_skill_names:
+                    dep_name = basename
             tgt_id = skill_node_ids.get(dep_name)
+            if src_id and not tgt_id:
+                virtual = kg.add(
+                    dep_name,
+                    content="",
+                    entry_type=EntryType.capability,
+                    tags=["matcreator-skill", "virtual"],
+                    metadata=EntryMetadata(
+                        source_provenance="dependency declaration",
+                        refinement_status=RefinementStatus.raw,
+                        verification_status=VerificationStatus.unverified,
+                        skill_level=SkillLevel.L1,
+                        custom={
+                            "managed_by": "matcreator",
+                            "kind": "virtual_dependency",
+                            "virtual": True,
+                            "virtual_reason": "referenced skill is not installed",
+                        },
+                    ),
+                )
+                tgt_id = virtual.id
+                skill_node_ids[dep_name] = tgt_id
+                virtualized += 1
             if src_id and tgt_id:
                 edges_created += int(
                     connect_once(
@@ -448,6 +518,8 @@ def seed_skills_to_graph() -> dict:
         "seeded": seeded,
         "attachments_seeded": attachments_seeded,
         "edges_created": edges_created,
+        "removed": removed,
+        "virtualized": virtualized,
     }
 
 
