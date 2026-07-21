@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v2.13.1 (2026-07-21)
+
+### Bug Fixes
+
+- Chat scroll position and IEM confirm
+  ([`5fca1d6`](https://github.com/AI4MS/MatCreator/commit/5fca1d6d68e3d51f45f317088faf8834ac77ea8e))
+
+- Enhance the integration with mat_agent_bench
+  ([`231c808`](https://github.com/AI4MS/MatCreator/commit/231c8084db75137ba7fa95f4e513af3cd782737d))
+
+- Issues with eval in server mode
+  ([`4e44a3c`](https://github.com/AI4MS/MatCreator/commit/4e44a3c19ee055f5cc1eca284cbaa30ff7b28d5a))
+
+### Chores
+
+- Update docs
+  ([`2691737`](https://github.com/AI4MS/MatCreator/commit/2691737e1cb742faeafb864fbf0ffff7d19098f2))
+
+
 ## v2.13.0 (2026-07-21)
 
 ### Bug Fixes
